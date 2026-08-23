@@ -139,3 +139,6 @@ The system includes real webcam capture powered by HTML5 `navigator.mediaDevices
 
 - **Simulated Databases**: Watchlist and Central Registry verification queries a local SQLite database designed for demonstration and hackathon evaluation.
 - **Biometric Accuracy**: Facial verification uses OpenCV Haar cascades and HSV histogram correlation as an educational and prototype screening heuristic. Biometric-grade border gates utilize deep metric embeddings (e.g. ArcFace/FaceNet with ISO/IEC 19794-5 standards).
+#   B O R D E R - D O C U M E N T - I N T E L L I G E N C E - S Y S T E M  
+ #   B O R D E R - D O C U M E N T - I N T E L L I G E N C E - S Y S T E M  
+ 

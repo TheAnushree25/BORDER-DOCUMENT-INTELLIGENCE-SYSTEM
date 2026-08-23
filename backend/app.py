@@ -14,7 +14,7 @@ FRONTEND_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "frontend"))
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 db.init_db()
 
 VALID_CREDENTIALS = {

@@ -1,4 +1,12 @@
-const API_BASE = window.location.origin;
+const isSameOriginBackend = (
+  window.location.port === "5000" ||
+  window.location.origin.includes(":5000") ||
+  (!["localhost", "127.0.0.1"].includes(window.location.hostname) && !window.location.port)
+);
+
+const API_BASE = isSameOriginBackend 
+  ? "" 
+  : `http://${window.location.hostname || "localhost"}:5000`;
 let selectedDocFile = null;
 let pendingLiveFace = null;
 let isScanning = false;

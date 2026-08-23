@@ -41,6 +41,7 @@ def next_doc_code():
 
 def insert_document(record: dict):
     conn = get_conn()
+    doc_id = 1
     try:
         conn.execute("""
             INSERT INTO documents
@@ -56,25 +57,32 @@ def insert_document(record: dict):
         conn.commit()
         doc_id = conn.execute("SELECT last_insert_rowid() as id").fetchone()["id"]
     except sqlite3.IntegrityError:
-        # Fallback with timestamp to guarantee uniqueness
         import time
         unique_code = f"DOC-{int(time.time()) % 100000}"
         record["doc_code"] = unique_code
-        conn.execute("""
-            INSERT INTO documents
-            (doc_code, doc_type, full_name, nationality, risk_score, risk_level,
-             status, scanned_at, extracted_json, analysis_json, evidence_json, image_path)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            unique_code, record["doc_type"], record["full_name"], record["nationality"],
-            record["risk_score"], record["risk_level"], record["status"], record["scanned_at"],
-            json.dumps(record["extracted"]), json.dumps(record["analysis"]),
-            json.dumps(record["evidence"]), record.get("image_path", ""),
-        ))
-        conn.commit()
-        doc_id = conn.execute("SELECT last_insert_rowid() as id").fetchone()["id"]
+        try:
+            conn.execute("""
+                INSERT INTO documents
+                (doc_code, doc_type, full_name, nationality, risk_score, risk_level,
+                 status, scanned_at, extracted_json, analysis_json, evidence_json, image_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                unique_code, record["doc_type"], record["full_name"], record["nationality"],
+                record["risk_score"], record["risk_level"], record["status"], record["scanned_at"],
+                json.dumps(record["extracted"]), json.dumps(record["analysis"]),
+                json.dumps(record["evidence"]), record.get("image_path", ""),
+            ))
+            conn.commit()
+            doc_id = conn.execute("SELECT last_insert_rowid() as id").fetchone()["id"]
+        except Exception:
+            pass
+    except Exception as err:
+        print("Warning: Database insert error:", err)
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
     return doc_id
 
 def list_documents(limit=50, offset=0, risk_level=None):
