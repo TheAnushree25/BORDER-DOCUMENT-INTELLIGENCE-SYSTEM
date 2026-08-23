@@ -6,5 +6,5 @@ echo ""
 echo "Starting Production Server on http://0.0.0.0:5000 ..."
 echo ""
 
-cd backend
-gunicorn --bind 0.0.0.0:5000 app:app --workers 2 --threads 4 --timeout 120
+export PORT=5000
+gunicorn wsgi:app -c gunicorn.conf.py

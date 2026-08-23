@@ -255,9 +255,10 @@ document.getElementById("btn-clear")?.addEventListener("click", () => {
   document.getElementById("evidence-box").innerHTML = `<div class="analysis-empty">No evidence overlay yet.</div>`;
 });
 
-// Primary Document Scan Execution Runner
-async function executeScan() {
-  if (isScanning || !selectedDocFile) return;
+// Primary Document Scan Execution Runner with Automatic Warmup Retry
+async function executeScan(retryCount = 0) {
+  if (isScanning && retryCount === 0) return;
+  if (!selectedDocFile) return;
 
   if (!pendingLiveFace) {
     openCameraModal();
@@ -266,27 +267,46 @@ async function executeScan() {
 
   isScanning = true;
   const analysisList = document.getElementById("analysis-list");
-  analysisList.innerHTML = `
-    <div class="scan-radar-card">
-      <div class="radar-spinner"></div>
-      <div class="scan-radar-title">INTELLIGENT SCAN IN PROGRESS</div>
-      <div class="scan-steps-list">
-        <div class="scan-step-item active"><span class="step-dot"></span> [1/4] Normalization &amp; Bilateral Filter</div>
-        <div class="scan-step-item active"><span class="step-dot"></span> [2/4] High-Speed OCR &amp; Dynamic Parsing</div>
-        <div class="scan-step-item active"><span class="step-dot"></span> [3/4] Forensic Tampering &amp; ELA Mapping</div>
-        <div class="scan-step-item active"><span class="step-dot"></span> [4/4] Biometric Landmark Cross-Verification</div>
-      </div>
-    </div>`;
+  
+  if (retryCount === 0) {
+    analysisList.innerHTML = `
+      <div class="scan-radar-card">
+        <div class="radar-spinner"></div>
+        <div class="scan-radar-title">INTELLIGENT SCAN IN PROGRESS</div>
+        <div class="scan-steps-list">
+          <div class="scan-step-item active"><span class="step-dot"></span> [1/4] Normalization &amp; Bilateral Filter</div>
+          <div class="scan-step-item active"><span class="step-dot"></span> [2/4] High-Speed OCR &amp; Dynamic Parsing</div>
+          <div class="scan-step-item active"><span class="step-dot"></span> [3/4] Forensic Tampering &amp; ELA Mapping</div>
+          <div class="scan-step-item active"><span class="step-dot"></span> [4/4] Biometric Landmark Cross-Verification</div>
+        </div>
+      </div>`;
+  } else {
+    analysisList.innerHTML = `
+      <div class="scan-radar-card">
+        <div class="radar-spinner"></div>
+        <div class="scan-radar-title" style="color:var(--amber);">WARMING UP AI WORKER — RETRYING SCAN</div>
+        <div style="color:var(--muted); font-size:12px; margin-top:8px;">
+          Upstream worker initialization in progress. Auto-reconnecting... (Attempt ${retryCount + 1}/2)
+        </div>
+      </div>`;
+  }
 
   const formData = new FormData();
   formData.append("document", selectedDocFile);
-  formData.append("live_face", pendingLiveFace);
+  if (pendingLiveFace instanceof Blob) {
+    formData.append("live_face", pendingLiveFace, "live_face.jpg");
+  }
 
   try {
     const res = await fetch(`${API_BASE}/api/scan`, { method: "POST", body: formData });
     const parsed = await parseApiResponse(res);
 
     if (!parsed.ok || !parsed.data) {
+      // Automatic retry on 502 Bad Gateway / 503 / 504 Gateway Timeout (e.g. Render container cold start)
+      if ((parsed.status === 502 || parsed.status === 503 || parsed.status === 504) && retryCount < 1) {
+        await new Promise(r => setTimeout(r, 2000));
+        return await executeScan(retryCount + 1);
+      }
       throw new Error(parsed.error || "Scan failed: Invalid server response.");
     }
 
@@ -297,9 +317,12 @@ async function executeScan() {
     analysisList.innerHTML = `
       <div style="text-align:center; padding:20px;">
         <div style="color:#ef4444; font-weight:700; margin-bottom:6px;">⚠️ Scan Blocked / Failed</div>
-        <div style="color:var(--muted); font-size:12px; max-width:420px; margin:0 auto; word-break:break-word;">
+        <div style="color:var(--muted); font-size:12px; max-width:420px; margin:0 auto 14px auto; word-break:break-word;">
           ${err.message || "An unexpected error occurred during processing."}
         </div>
+        <button type="button" class="btn btn-secondary" onclick="executeScan()" style="padding:6px 16px; font-size:12px; cursor:pointer;">
+          🔄 Retry Scan Now
+        </button>
       </div>`;
   } finally {
     isScanning = false;

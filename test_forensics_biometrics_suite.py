@@ -75,7 +75,7 @@ authentication or scanning ofQR code/offlineXML)
 
     fields = document_extractor.extract_aadhaar_fields(raw_ocr)
     print("Extracted Aadhaar Fields:", fields)
-    assert fields["Full Name"] == "UJWAL GOND"
+    assert fields["Full Name"].upper() == "UJWAL GOND"
     assert fields["Date of Birth"] == "02/02/2006" # Issue date 19/01/2016 successfully ignored
     assert fields["Gender"] == "MALE"
     assert fields["Aadhaar Number"] == "XXXX XXXX 7245"

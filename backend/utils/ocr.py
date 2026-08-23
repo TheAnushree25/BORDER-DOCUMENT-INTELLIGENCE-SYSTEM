@@ -23,13 +23,20 @@ else:
             TESSERACT_AVAILABLE = True
             break
 
-# 2. Discover RapidOCR engine
+# 2. Discover RapidOCR engine (Lazy loaded per worker process for Gunicorn fork safety)
 _RAPID_ENGINE = None
-try:
-    from rapidocr_onnxruntime import RapidOCR
-    _RAPID_ENGINE = RapidOCR()
-except Exception:
-    _RAPID_ENGINE = None
+_RAPID_INITIALIZED = False
+
+def _get_rapid_engine():
+    global _RAPID_ENGINE, _RAPID_INITIALIZED
+    if not _RAPID_INITIALIZED:
+        _RAPID_INITIALIZED = True
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+            _RAPID_ENGINE = RapidOCR()
+        except Exception:
+            _RAPID_ENGINE = None
+    return _RAPID_ENGINE
 
 # 3. Check language availability
 _AVAILABLE_LANGS = []
@@ -89,7 +96,7 @@ def auto_detect_and_crop_card(cv_img):
             heightB = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
             maxHeight = max(int(heightA), int(heightB))
 
-            # Must have card-like aspect ratio (between 1.3 and 1.9)
+            # Must have card-like aspect ratio (between 1.25 and 1.95)
             card_aspect = maxWidth / float(max(maxHeight, 1))
             if maxWidth > 200 and maxHeight > 120 and (1.25 <= card_aspect <= 1.95):
                 dst = np.array([
@@ -109,50 +116,71 @@ def extract_text_fast(image: Image.Image) -> dict:
     """
     Sub-second high-accuracy OCR pipeline with card auto-crop, deskew, and dual engine support.
     """
-    img = ImageOps.exif_transpose(image).convert("RGB")
-    cv_img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+    try:
+        img = ImageOps.exif_transpose(image).convert("RGB")
+        cv_img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
-    # 1. Card Auto Crop / Deskew (if on background table)
-    cropped_card = auto_detect_and_crop_card(cv_img)
+        # 1. Card Auto Crop / Deskew (if on background table)
+        cropped_card = auto_detect_and_crop_card(cv_img)
 
-    # 2. Optimized Preprocessing for OCR
-    gray = cv2.cvtColor(cropped_card, cv2.COLOR_BGR2GRAY)
-    
-    if gray.shape[1] < 1000:
-        scale = 1000.0 / gray.shape[1]
-        gray = cv2.resize(gray, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        # 2. Optimized Preprocessing for OCR
+        ch, cw = cropped_card.shape[:2]
+        gray = cv2.cvtColor(cropped_card, cv2.COLOR_BGR2GRAY)
+        
+        # Scale for OCR preprocessing
+        if cw < 900:
+            scale_ocr = 900.0 / float(cw)
+            gray_pre = cv2.resize(gray, (0, 0), fx=scale_ocr, fy=scale_ocr, interpolation=cv2.INTER_CUBIC)
+        elif cw > 1200:
+            scale_ocr = 1200.0 / float(cw)
+            gray_pre = cv2.resize(gray, (0, 0), fx=scale_ocr, fy=scale_ocr, interpolation=cv2.INTER_AREA)
+        else:
+            gray_pre = gray
 
-    denoised = cv2.bilateralFilter(gray, 9, 75, 75)
-    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-    enhanced = clahe.apply(denoised)
+        denoised = cv2.bilateralFilter(gray_pre, 9, 75, 75)
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        enhanced = clahe.apply(denoised)
 
-    text = ""
-    engine_used = "tesseract"
+        text = ""
+        engine_used = "none"
 
-    # 3. RapidOCR primary / fallback
-    if _RAPID_ENGINE is not None:
-        try:
-            rapid_res, _ = _RAPID_ENGINE(cropped_card)
-            if rapid_res:
-                lines = [item[1] for item in rapid_res if len(item) > 1 and item[1].strip()]
-                text = "\n".join(lines)
-                engine_used = "rapidocr"
-        except Exception:
-            pass
+        # 3. RapidOCR primary (Scale to max 960px for sub-second execution & low RAM)
+        rapid_engine = _get_rapid_engine()
+        if rapid_engine is not None:
+            try:
+                scale_rapid = 960.0 / float(max(ch, cw)) if max(ch, cw) > 960 else 1.0
+                if scale_rapid < 1.0:
+                    rapid_input = cv2.resize(cropped_card, (0, 0), fx=scale_rapid, fy=scale_rapid, interpolation=cv2.INTER_AREA)
+                else:
+                    rapid_input = cropped_card
 
-    # 4. Tesseract fallback if RapidOCR didn't return sufficient text
-    if (not text.strip() or len(text.strip()) < 20) and TESSERACT_AVAILABLE:
-        config_psm6 = r"--oem 3 --psm 6"
-        try:
-            tess_text = pytesseract.image_to_string(enhanced, lang=OCR_LANG, config=config_psm6)
-            if len(tess_text.strip()) > len(text.strip()):
-                text = tess_text
-                engine_used = "tesseract"
-        except Exception:
-            pass
+                rapid_res, _ = rapid_engine(rapid_input)
+                if rapid_res:
+                    lines = [item[1] for item in rapid_res if len(item) > 1 and item[1].strip()]
+                    text = "\n".join(lines)
+                    engine_used = "rapidocr"
+            except Exception:
+                pass
 
-    return {
-        "text": text,
-        "language": OCR_LANG,
-        "engine": engine_used
-    }
+        # 4. Tesseract fallback if RapidOCR didn't return sufficient text
+        if (not text.strip() or len(text.strip()) < 20) and TESSERACT_AVAILABLE:
+            config_psm6 = r"--oem 3 --psm 6"
+            try:
+                tess_text = pytesseract.image_to_string(enhanced, lang=OCR_LANG, config=config_psm6)
+                if len(tess_text.strip()) > len(text.strip()):
+                    text = tess_text
+                    engine_used = "tesseract"
+            except Exception:
+                pass
+
+        return {
+            "text": text,
+            "language": OCR_LANG,
+            "engine": engine_used
+        }
+    except Exception as exc:
+        return {
+            "text": "",
+            "language": OCR_LANG,
+            "engine": "failed"
+        }

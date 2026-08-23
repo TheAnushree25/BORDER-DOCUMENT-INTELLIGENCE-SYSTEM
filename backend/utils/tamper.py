@@ -4,13 +4,13 @@ import cv2
 import numpy as np
 from PIL import Image, ImageChops
 
-def error_level_analysis(image: Image.Image, quality: int = 90, ocr_text: str = "") -> dict:
+def error_level_analysis(image: Image.Image, quality: int = 90, ocr_text: str = "", ocr_boxes: list = None, **kwargs) -> dict:
     """
     Precision Forensic Tampering & Splicing Detection Engine.
     Detects:
     1. Flat digital whiteout boxes (zero-sensor-noise RGB paint patches).
-    2. Synthetic neon digital marker/pen scribbles.
-    3. 12x12 localized grid compression anomalies (pasted digital patches).
+    2. Synthetic digital marker/pen scribbles & sharp overlay discontinuities.
+    3. Localized grid compression anomalies (pasted digital patches).
     4. Template integrity & spliced text delimiters (e.g. tampered DOB with dot delimiter).
     Guarantees zero false positives on genuine printed text, card backgrounds, and official disclaimers.
     """
@@ -38,7 +38,7 @@ def error_level_analysis(image: Image.Image, quality: int = 90, ocr_text: str = 
     sq_blur = cv2.blur(gray.astype(np.float32), (7, 7))**2
     local_std = np.sqrt(np.maximum(blur_sq - sq_blur, 0))
 
-    pure_digital_whiteout = (v_chan >= 252) & (s_chan <= 3) & (local_std < 0.35)
+    pure_digital_whiteout = (v_chan >= 250) & (s_chan <= 8) & (local_std < 0.50)
     pure_digital_marker = (s_chan >= 245) & (v_chan >= 220) & (local_std < 0.50)
     digital_tamper_mask = (pure_digital_whiteout | pure_digital_marker).astype(np.uint8)
 
@@ -62,13 +62,26 @@ def error_level_analysis(image: Image.Image, quality: int = 90, ocr_text: str = 
             if (bw / float(max(bh, 1))) < 6.0 and bh > 10 and bw > 15:
                 total_area += area
                 suspicious_regions.append({
-                    "x_pct": round((bx / w) * 100, 1),
-                    "y_pct": round((by / h) * 100, 1),
-                    "w_pct": round((bw / w) * 100, 1),
-                    "h_pct": round((bh / h) * 100, 1),
+                    "x_pct": float(round((bx / float(w)) * 100, 1)),
+                    "y_pct": float(round((by / float(h)) * 100, 1)),
+                    "w_pct": float(round((bw / float(w)) * 100, 1)),
+                    "h_pct": float(round((bh / float(h)) * 100, 1)),
                     "severity": "high",
                     "label": "Digital Paint / Whiteout Alteration"
                 })
+
+    # Large Heavy Paint/Scribble Overlay Check (e.g. Saturated Marker obscuring card numbers)
+    bottom_half_s = s_chan[int(h * 0.45):int(h * 0.95), int(w * 0.1):int(w * 0.9)]
+    bottom_half_v = v_chan[int(h * 0.45):int(h * 0.95), int(w * 0.1):int(w * 0.9)]
+    if float(bottom_half_s.mean()) > 120.0 and float(bottom_half_v.mean()) < 140.0:
+        suspicious_regions.append({
+            "x_pct": 10.0,
+            "y_pct": 50.0,
+            "w_pct": 80.0,
+            "h_pct": 40.0,
+            "severity": "high",
+            "label": "Saturated Paint / Marker Obscuration"
+        })
 
     # 3. 12x12 Micro-Grid Compression Anomaly (Different JPEG Compression Factor)
     grid_r, grid_c = 12, 12
@@ -82,17 +95,17 @@ def error_level_analysis(image: Image.Image, quality: int = 90, ocr_text: str = 
 
     if cell_variances:
         variances = [v for (_, _, v) in cell_variances]
-        mean_v = np.mean(variances)
-        std_v = np.std(variances)
+        mean_v = float(np.mean(variances))
+        std_v = float(np.std(variances))
         var_threshold = mean_v + (std_v * 2.8)
 
         for (r, c, c_var) in cell_variances:
             if c_var > var_threshold and c_var > 45.0:
                 suspicious_regions.append({
-                    "x_pct": round((c * gw / w) * 100, 1),
-                    "y_pct": round((r * gh / h) * 100, 1),
-                    "w_pct": round((gw / w) * 100, 1),
-                    "h_pct": round((gh / h) * 100, 1),
+                    "x_pct": float(round((c * gw / float(w)) * 100, 1)),
+                    "y_pct": float(round((r * gh / float(h)) * 100, 1)),
+                    "w_pct": float(round((gw / float(w)) * 100, 1)),
+                    "h_pct": float(round((gh / float(h)) * 100, 1)),
                     "severity": "high",
                     "label": "Spliced / Overwritten Compression Patch"
                 })
@@ -113,17 +126,19 @@ def error_level_analysis(image: Image.Image, quality: int = 90, ocr_text: str = 
                     })
 
     tampering_detected = len(suspicious_regions) > 0 or ela_mean > 26.0
-    tamper_score = min(100, int(len(suspicious_regions) * 25 + ela_mean * 1.8)) if tampering_detected else min(10, int(ela_mean))
+    if tampering_detected:
+        tamper_score = min(100, int(max(60, len(suspicious_regions) * 35) + ela_mean * 1.5))
+    else:
+        tamper_score = min(15, int(ela_mean))
 
     if tampering_detected:
         detail = f"[Forensic Anomaly] Digital manipulation / Spliced text detected in {len(suspicious_regions)} zone(s) (Score: {tamper_score}/100)"
     else:
         detail = "No manipulation or overlay signature detected via ELA"
-        filtered_regions = []
 
     return {
-        "tamper_score": tamper_score,
-        "tampering_detected": tampering_detected,
+        "tamper_score": int(tamper_score),
+        "tampering_detected": bool(tampering_detected),
         "suspicious_regions": suspicious_regions[:6],
         "detail": detail
     }

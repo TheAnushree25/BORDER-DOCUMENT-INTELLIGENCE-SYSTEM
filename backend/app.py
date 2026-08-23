@@ -337,6 +337,23 @@ def database_check():
         "results": formatted
     })
 
+def sanitize_for_json(obj):
+    """
+    Recursively sanitize objects to guarantee 100% native Python JSON serializability.
+    Converts numpy scalars, arrays, datetime, etc.
+    """
+    if isinstance(obj, dict):
+        return {str(k): sanitize_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple, set)):
+        return [sanitize_for_json(item) for item in obj]
+    elif hasattr(obj, "item") and callable(getattr(obj, "item")):
+        return obj.item()
+    elif isinstance(obj, (float, int, str, bool)) or obj is None:
+        return obj
+    elif hasattr(obj, "tolist") and callable(getattr(obj, "tolist")):
+        return obj.tolist()
+    return str(obj)
+
 @app.route("/api/scan", methods=["POST"])
 def scan_document():
     try:
@@ -350,8 +367,8 @@ def scan_document():
         try:
             image = Image.open(doc_file.stream)
             image.load()
-            # Memory-Safe Auto Scale: Cap oversized images at 1600px to prevent container OOM crashes
-            max_doc_dim = 1600
+            # Memory-Safe Auto Scale: Cap oversized images at 1280px to prevent container OOM crashes
+            max_doc_dim = 1280
             if max(image.width, image.height) > max_doc_dim:
                 scale = max_doc_dim / float(max(image.width, image.height))
                 new_w, new_h = int(image.width * scale), int(image.height * scale)
@@ -364,7 +381,7 @@ def scan_document():
             try:
                 live_image = Image.open(live_file.stream)
                 live_image.load()
-                max_live_dim = 1000
+                max_live_dim = 800
                 if max(live_image.width, live_image.height) > max_live_dim:
                     scale = max_live_dim / float(max(live_image.width, live_image.height))
                     new_w, new_h = int(live_image.width * scale), int(live_image.height * scale)
@@ -374,13 +391,17 @@ def scan_document():
 
         doc_code = db.next_doc_code()
         saved_name = f"{doc_code}.jpg"
-        image.convert("RGB").save(os.path.join(UPLOAD_DIR, saved_name), "JPEG")
+        try:
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
+            image.convert("RGB").save(os.path.join(UPLOAD_DIR, saved_name), "JPEG")
+        except Exception as save_err:
+            print("Warning: Could not save image to uploads directory:", save_err)
 
         analysis, extracted, evidence_regions = {}, {}, []
 
         # 1. Fast Single-Pass OCR
         ocr_res = ocr.extract_text_fast(image)
-        raw_ocr_text = ocr_res["text"]
+        raw_ocr_text = ocr_res.get("text", "")
         
         # 2. Document Classification & Field Parsing
         mrz_lines = mrz.extract_mrz_lines(raw_ocr_text)
@@ -449,6 +470,7 @@ def scan_document():
         if tamper_result["tampering_detected"]:
             analysis["ocr"] = {"status": "ALERT", "detail": "Extraction compromised due to physical/digital alteration"}
             analysis["document_validation"] = {"status": "ALERT", "detail": "Structural integrity failed (Tampering detected)"}
+            extracted["Document Status"] = "COMPROMISED / TAMPERED"
         else:
             ocr_ok = bool(raw_ocr_text.strip()) and (extracted.get("Full Name") not in ["UNKNOWN", "UNREADABLE"])
             analysis["ocr"] = {
@@ -494,7 +516,7 @@ def scan_document():
             "search_term": extracted.get("Full Name") or extracted.get("PAN Number") or extracted.get("Aadhaar Number") or doc_code
         }
 
-        return jsonify({
+        response_payload = {
             "id": doc_id,
             "doc_code": doc_code,
             "document_type": doc_type,
@@ -504,7 +526,9 @@ def scan_document():
             "evidence": evidence_regions,
             "manual_referral": manual_referral,
             "image_path": f"/uploads/{saved_name}"
-        })
+        }
+
+        return jsonify(sanitize_for_json(response_payload))
     except Exception as err:
         print("Internal scan processing error:", err)
         return jsonify({"error": f"Internal scan processing error: {str(err)}"}), 500
