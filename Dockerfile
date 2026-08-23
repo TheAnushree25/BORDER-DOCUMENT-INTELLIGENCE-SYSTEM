@@ -29,9 +29,11 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Copy backend and frontend source code
+# Copy backend, frontend, and WSGI entry point
 COPY backend/ ./backend/
 COPY frontend/ ./frontend/
+COPY wsgi.py ./
+COPY app.py ./
 
 # Ensure uploads directory exists
 RUN mkdir -p backend/uploads
@@ -44,4 +46,4 @@ HEALTHCHECK --interval=20s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -f http://localhost:${PORT}/api/health || curl -f http://localhost:${PORT}/health || exit 1
 
 # Start production Gunicorn server with /dev/shm heartbeat and 180s timeout
-CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-5000} --chdir backend app:app --workers 2 --threads 4 --timeout 180 --worker-tmp-dir /dev/shm --access-logfile - --error-logfile -"]
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-5000} wsgi:app --workers 2 --threads 4 --timeout 180 --worker-tmp-dir /dev/shm --access-logfile - --error-logfile -"]

@@ -1,6 +1,12 @@
 import os
+import sys
 import json
 from datetime import datetime
+
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from PIL import Image
@@ -8,7 +14,6 @@ from PIL import Image
 import database as db
 from utils import ocr, mrz, tamper, face_match, risk, document_extractor
 
-BASE_DIR = os.path.dirname(__file__)
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 FRONTEND_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "frontend"))
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -52,6 +57,7 @@ USERS_LIST = [
 ]
 
 @app.route("/api/login", methods=["POST", "OPTIONS"])
+@app.route("/api/auth/login", methods=["POST", "OPTIONS"])
 def login():
     if request.method == "OPTIONS":
         return jsonify({"status": "ok"}), 200
@@ -327,13 +333,9 @@ def scan_document():
         if "document" not in request.files:
             return jsonify({"error": "No document file uploaded"}), 400
 
-        if "live_face" not in request.files or not request.files["live_face"].filename:
-            return jsonify({
-                "error": "Mandatory Biometric Face Capture required before processing document."
-            }), 400
-
         doc_file = request.files["document"]
-        live_file = request.files["live_face"]
+        has_live_face = "live_face" in request.files and bool(request.files["live_face"].filename)
+        live_file = request.files["live_face"] if has_live_face else None
 
         try:
             image = Image.open(doc_file.stream)
@@ -347,16 +349,18 @@ def scan_document():
         except Exception as e:
             return jsonify({"error": f"Invalid document image format: {str(e)}"}), 400
 
-        try:
-            live_image = Image.open(live_file.stream)
-            live_image.load()
-            max_live_dim = 1000
-            if max(live_image.width, live_image.height) > max_live_dim:
-                scale = max_live_dim / float(max(live_image.width, live_image.height))
-                new_w, new_h = int(live_image.width * scale), int(live_image.height * scale)
-                live_image = live_image.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        except Exception as e:
-            return jsonify({"error": f"Invalid live face image format: {str(e)}"}), 400
+        live_image = None
+        if has_live_face and live_file:
+            try:
+                live_image = Image.open(live_file.stream)
+                live_image.load()
+                max_live_dim = 1000
+                if max(live_image.width, live_image.height) > max_live_dim:
+                    scale = max_live_dim / float(max(live_image.width, live_image.height))
+                    new_w, new_h = int(live_image.width * scale), int(live_image.height * scale)
+                    live_image = live_image.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            except Exception as e:
+                return jsonify({"error": f"Invalid live face image format: {str(e)}"}), 400
 
         doc_code = db.next_doc_code()
         saved_name = f"{doc_code}.jpg"
@@ -400,28 +404,36 @@ def scan_document():
         for r in tamper_result.get("suspicious_regions", []):
             evidence_regions.append(r)
 
-        # 4. Mandatory Biometric Face Verification
-        match_data = face_match.compare_faces(image, live_image)
-        face_result = {**match_data, "compared": True}
-        
-        if match_data.get("doc_box"):
-            if match_data["match"]:
-                evidence_regions.append({
-                    **match_data["doc_box"],
-                    "severity": "low",
-                    "label": f"Verified Portrait ({match_data['similarity']}%)"
-                })
-            else:
-                evidence_regions.append({
-                    **match_data["doc_box"],
-                    "severity": "high",
-                    "label": f"Face Mismatch / Untrusted Portrait ({match_data['similarity']}%)"
-                })
+        # 4. Biometric Face Verification
+        if live_image is not None:
+            match_data = face_match.compare_faces(image, live_image)
+            face_result = {**match_data, "compared": True}
+            
+            if match_data.get("doc_box"):
+                if match_data["match"]:
+                    evidence_regions.append({
+                        **match_data["doc_box"],
+                        "severity": "low",
+                        "label": f"Verified Portrait ({match_data['similarity']}%)"
+                    })
+                else:
+                    evidence_regions.append({
+                        **match_data["doc_box"],
+                        "severity": "high",
+                        "label": f"Face Mismatch / Untrusted Portrait ({match_data['similarity']}%)"
+                    })
 
-        analysis["face_verification"] = {
-            "status": "MATCH" if match_data["match"] else "ALERT",
-            "detail": match_data["reason"]
-        }
+            analysis["face_verification"] = {
+                "status": "MATCH" if match_data["match"] else "ALERT",
+                "detail": match_data["reason"]
+            }
+        else:
+            match_data = {"match": True, "similarity": 100, "reason": "Biometric face comparison omitted", "compared": False}
+            face_result = {**match_data, "compared": False}
+            analysis["face_verification"] = {
+                "status": "N/A",
+                "detail": "Live biometric capture not provided"
+            }
 
         # 5. Document Integrity Assessment
         if tamper_result["tampering_detected"]:

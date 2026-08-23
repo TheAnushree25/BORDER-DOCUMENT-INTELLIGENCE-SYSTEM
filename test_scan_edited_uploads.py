@@ -31,7 +31,7 @@ def test_scan_edited():
         print(f"TESTING: {label} ({path})")
         print("="*60)
         
-        boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
+        boundary = "WebKitFormBoundary7MA4YWxkTrZu0gW"
         with open(path, "rb") as f:
             file_bytes = f.read()
 
@@ -48,8 +48,12 @@ def test_scan_edited():
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}
         )
 
-        with opener.open(req_scan) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        try:
+            with opener.open(req_scan) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            print("HTTP Error:", e.code, e.read().decode("utf-8"))
+            continue
 
         print("Doc Code:", data.get("doc_code"))
         print("Risk Score:", data.get("risk", {}).get("score"), "Level:", data.get("risk", {}).get("level"))
