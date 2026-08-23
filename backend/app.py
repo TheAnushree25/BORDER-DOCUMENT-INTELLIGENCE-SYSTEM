@@ -3,19 +3,29 @@ import sys
 import json
 from datetime import datetime
 
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-if BASE_DIR not in sys.path:
-    sys.path.insert(0, BASE_DIR)
+# Multi-Path Environment Discovery (Root, Parent, Backend)
+CURRENT_DIR = os.path.abspath(os.path.dirname(__file__))
+PARENT_DIR = os.path.dirname(CURRENT_DIR)
+BACKEND_DIR = os.path.join(PARENT_DIR, "backend") if os.path.basename(CURRENT_DIR) != "backend" else CURRENT_DIR
+
+for p in [CURRENT_DIR, PARENT_DIR, BACKEND_DIR]:
+    if p and p not in sys.path and os.path.exists(p):
+        sys.path.insert(0, p)
 
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from PIL import Image
 
-import database as db
-from utils import ocr, mrz, tamper, face_match, risk, document_extractor
+# Robust Dual-Path Import Handling with Fallbacks
+try:
+    from utils import ocr, mrz, tamper, face_match, risk, document_extractor
+    import database as db
+except ImportError:
+    from backend.utils import ocr, mrz, tamper, face_match, risk, document_extractor
+    from backend import database as db
 
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-FRONTEND_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "frontend"))
+UPLOAD_DIR = os.path.join(CURRENT_DIR, "uploads")
+FRONTEND_DIR = os.path.abspath(os.path.join(CURRENT_DIR, "..", "frontend")) if os.path.exists(os.path.join(CURRENT_DIR, "..", "frontend")) else os.path.abspath(os.path.join(CURRENT_DIR, "frontend"))
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 app = Flask(__name__)
