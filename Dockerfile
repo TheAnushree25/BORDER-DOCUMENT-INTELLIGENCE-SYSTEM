@@ -4,7 +4,7 @@ FROM python:3.11-slim-bookworm
 # Prevent Python from writing .pyc and enable unbuffered output
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
-ENV PORT=8000
+ENV PORT=10000
 
 # Install required system packages for OpenCV, Tesseract OCR, and C-extensions
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -35,16 +35,17 @@ COPY backend/ ./backend/
 COPY frontend/ ./frontend/
 COPY wsgi.py ./
 COPY app.py ./
+COPY gunicorn.conf.py ./
 
 # Ensure uploads directory exists
 RUN mkdir -p backend/uploads
 
 # Expose default port
-EXPOSE 8000
+EXPOSE 10000
 
 # Healthcheck for /health and /api/health
 HEALTHCHECK --interval=20s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -f http://localhost:${PORT}/health || curl -f http://localhost:${PORT}/api/health || exit 1
 
-# Start production server with Gunicorn on port 8000
-CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-8000} wsgi:app --workers 2 --threads 4 --timeout 180 --worker-tmp-dir /dev/shm --access-logfile - --error-logfile -"]
+# Start production server with Gunicorn loading gunicorn.conf.py
+CMD ["gunicorn", "wsgi:app", "-c", "gunicorn.conf.py"]
