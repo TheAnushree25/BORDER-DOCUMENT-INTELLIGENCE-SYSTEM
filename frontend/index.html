@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Border Document Intelligence System</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- Login Modal -->
+<div id="login-modal" class="modal" style="display: flex;">
+  <div class="login-card">
+    <div class="brand-shield-icon">🛡️</div>
+    <h2>BORDER DOCUMENT INTELLIGENCE SYSTEM</h2>
+    <div class="login-sub">AI-Powered Border Document Screening &amp; Fraud Detection</div>
+    <div class="login-restricted-banner">🔒 RESTRICTED ACCESS — AUTHORIZED PERSONNEL ONLY</div>
+
+    <form id="login-form" onsubmit="return false;">
+      <div class="form-group">
+        <label>Officer / Admin Username</label>
+        <input type="text" id="login-user" value="admin" autocomplete="username" />
+      </div>
+      <div class="form-group">
+        <label>Security Password</label>
+        <input type="password" id="login-pass" value="Admin@123" autocomplete="current-password" />
+      </div>
+      <div id="login-error" class="login-error-msg" style="display: none;"></div>
+      <button type="button" id="btn-login-submit" class="btn-primary btn-login">🔓 Authenticate &amp; Access Dashboard</button>
+    </form>
+
+    <div class="login-divider"><span>SIH Demo Quick Login:</span></div>
+    <button type="button" class="btn-quick-demo" id="btn-quick-login">⚡ One-Click Login as Demo Admin (admin / Admin@123)</button>
+  </div>
+</div>
+
+<!-- Shift Handover & History Modal -->
+<div id="shift-modal" class="modal" style="display: none;">
+  <div class="shift-modal-card">
+    <div class="modal-header">
+      <div style="display: flex; align-items: center; gap: 10px;">
+        <span style="font-size: 24px;">⏱️</span>
+        <div>
+          <div style="font-size: 16px; font-weight: 700; color: #fff;">BORDER GUARD SHIFT HANDOVER &amp; LOGS</div>
+          <div style="font-size: 12px; color: var(--muted);">Active Shift Real-Time Telemetry vs. Previous Shift Baseline</div>
+        </div>
+      </div>
+      <button type="button" class="btn-close-modal" id="btn-close-shift-modal">✕</button>
+    </div>
+
+    <div class="shift-grid-comparison">
+      <!-- Active Current Shift Box -->
+      <div class="shift-box active-shift-box">
+        <div class="shift-box-header">
+          <span class="shift-tag active">● ACTIVE CURRENT SHIFT</span>
+          <span id="modal-curr-date" class="shift-date">23 Aug 2026</span>
+        </div>
+        <div class="shift-title" id="modal-curr-shift-name">Shift B (Evening 14:00 - 22:00)</div>
+        <div class="shift-officer">Duty Officer: <b>System Administrator</b></div>
+        
+        <div class="shift-metrics-row">
+          <div class="sm-card">
+            <div class="sm-label">Total Scans</div>
+            <div class="sm-value" id="modal-curr-total">0</div>
+          </div>
+          <div class="sm-card high">
+            <div class="sm-label">High Risk</div>
+            <div class="sm-value" id="modal-curr-high">0</div>
+          </div>
+          <div class="sm-card med">
+            <div class="sm-label">Medium Risk</div>
+            <div class="sm-value" id="modal-curr-med">0</div>
+          </div>
+          <div class="sm-card low">
+            <div class="sm-label">Low / Cleared</div>
+            <div class="sm-value" id="modal-curr-low">0</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Previous Shift Box -->
+      <div class="shift-box prev-shift-box">
+        <div class="shift-box-header">
+          <span class="shift-tag prev">✓ PREVIOUS SHIFT (COMPLETED)</span>
+          <span id="modal-prev-date" class="shift-date">22 Aug 2026</span>
+        </div>
+        <div class="shift-title" id="modal-prev-shift-name">Shift A (Morning 06:00 - 14:00)</div>
+        <div class="shift-officer">Duty Officer: <b>Officer In-Charge (Shift Lead)</b></div>
+        
+        <div class="shift-metrics-row">
+          <div class="sm-card">
+            <div class="sm-label">Total Scans</div>
+            <div class="sm-value" id="modal-prev-total">0</div>
+          </div>
+          <div class="sm-card high">
+            <div class="sm-label">High Risk</div>
+            <div class="sm-value" id="modal-prev-high">0</div>
+          </div>
+          <div class="sm-card med">
+            <div class="sm-label">Medium Risk</div>
+            <div class="sm-value" id="modal-prev-med">0</div>
+          </div>
+          <div class="sm-card low">
+            <div class="sm-label">Low / Cleared</div>
+            <div class="sm-value" id="modal-prev-low">0</div>
+          </div>
+        </div>
+
+        <div class="handover-status-badge">
+          <span>✓ Handover Logged &amp; Verified</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Shift Delta Comparison Bar -->
+    <div class="shift-delta-bar">
+      <div style="font-weight: 600; font-size: 13px; color: #fff; margin-bottom: 6px;">📈 Shift-over-Shift Performance Delta</div>
+      <div class="delta-tags-container" id="modal-delta-container">
+        <!-- populated dynamically in script.js -->
+      </div>
+    </div>
+  </div>
+</div>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-icon">🛡️</div>
+    <div>
+      <div class="brand-title">BORDER DOCUMENT<br/>INTELLIGENCE SYSTEM</div>
+      <div class="brand-sub">AI-Powered Multi-Document Screening</div>
+    </div>
+  </div>
+
+  <!-- Documents Scanned Pill -->
+  <div class="stat-pill">
+    <div class="stat-label">Documents Scanned (Today)</div>
+    <div class="stat-value" id="stat-total">0</div>
+    <div class="stat-delta up" id="stat-total-delta">↑ 0 today • 0 total</div>
+  </div>
+
+  <!-- High Risk Pill -->
+  <div class="stat-pill high">
+    <div class="stat-label">High Risk (Today)</div>
+    <div class="stat-value" id="stat-high">0</div>
+    <div class="stat-delta up" id="stat-high-delta">↑ 0 today (0 total)</div>
+  </div>
+
+  <!-- Medium Risk Pill -->
+  <div class="stat-pill medium">
+    <div class="stat-label">Medium Risk (Today)</div>
+    <div class="stat-value" id="stat-medium">0</div>
+    <div class="stat-delta up" id="stat-medium-delta">↑ 0 today (0 total)</div>
+  </div>
+
+  <!-- Low Risk Pill -->
+  <div class="stat-pill low">
+    <div class="stat-label">Low Risk (Today)</div>
+    <div class="stat-value" id="stat-low">0</div>
+    <div class="stat-delta up" id="stat-low-delta">✓ 0 today (0 total)</div>
+  </div>
+
+  <!-- Shift Handover & History Pill -->
+  <div class="stat-pill shift-pill" id="btn-open-shift-modal" style="cursor: pointer;" title="Click to view Shift Handover &amp; Previous Shift Report">
+    <div class="stat-label">Shift Handover &amp; History</div>
+    <div class="stat-value" id="stat-current-shift" style="font-size: 13px; font-weight: 700; color: var(--accent);">Shift Active</div>
+    <div class="stat-delta up" id="stat-prev-shift-summary" style="font-size: 11px;">Prev: 0 scans • 0 High</div>
+  </div>
+
+  <div class="officer" id="btn-admin-profile" style="cursor: pointer;" title="Click to open System Administrator Command Center">
+    <div class="officer-avatar">👤</div>
+    <div>
+      <div class="officer-title" style="display:flex; align-items:center; gap:4px;">System Administrator <span style="font-size:11px;">⚙️</span></div>
+      <div class="officer-sub" id="shift-label">Daily Shift: Active</div>
+    </div>
+  </div>
+</header>
+
+<div class="layout">
+  <nav class="sidebar">
+    <div class="menu-label">MENU</div>
+    <a class="menu-item active">🏠 Dashboard</a>
+    <a class="menu-item">📄 Scan Document</a>
+    <a class="menu-item">📁 All Documents</a>
+    <a class="menu-item">🔔 Risk Alerts <span class="badge" id="alert-badge">0</span></a>
+    <a class="menu-item">👥 Watchlist</a>
+    <a class="menu-item">📊 Reports &amp; Analytics</a>
+    <a class="menu-item">🗄️ Database Check</a>
+    <a class="menu-item">⚙️ Rule Engine</a>
+    <a class="menu-item">📋 Audit Logs</a>
+    <a class="menu-item">👤 Users &amp; Roles</a>
+    <a class="menu-item">🔧 System Settings</a>
+
+    <div class="menu-label" style="margin-top:24px;">SYSTEM STATUS</div>
+    <div class="status-row"><span class="dot green"></span> AI Services <span class="status-val">Online</span></div>
+    <div class="status-row"><span class="dot green"></span> Database <span class="status-val">Online</span></div>
+    <div class="status-row"><span class="dot green"></span> Storage <span class="status-val">Online</span></div>
+    <div class="status-row"><span class="dot green"></span> Verification Gateway <span class="status-val">Online</span></div>
+
+    <a class="menu-item logout" id="btn-logout">⏻ Logout</a>
+  </nav>
+
+  <main class="content">
+    <!-- VIEW 1: DASHBOARD (Overview) -->
+    <div id="view-dashboard" class="app-view active">
+      <div class="grid-top">
+        <section class="card">
+          <h3 style="margin-top:0;">SYSTEM OPERATIONAL STATUS</h3>
+          <div style="padding: 10px 0; font-size: 13px; line-height: 1.8;">
+            <div><b>AI Multi-Pass OCR:</b> <span style="color:var(--green)">Active (Eng+Hin)</span></div>
+            <div><b>Forensic ELA Engine:</b> <span style="color:var(--green)">Adaptive Filtering Online</span></div>
+            <div><b>Biometric Gateway:</b> <span style="color:var(--green)">Ready</span></div>
+            <div><b>Central Registry Sync:</b> <span style="color:var(--green)">Connected</span></div>
+          </div>
+        </section>
+
+        <section class="card">
+          <h3 style="margin-top:0;">QUICK ACTION</h3>
+          <p style="font-size: 12px; color: var(--muted); margin-bottom: 16px;">
+            Ingest border documents, passports, or national IDs for immediate automated screening.
+          </p>
+          <button type="button" id="btn-goto-scanner" class="btn-primary" style="width: 100%;">
+            📄 Open Screening Scanner
+          </button>
+        </section>
+
+        <section class="card">
+          <h3 style="margin-top:0;">SECURITY METRIC BREAKDOWN</h3>
+          <div id="dashboard-risk-breakdown" style="padding: 6px 0; font-size: 12px; line-height: 1.9;">
+            <div>Integrity Pass Rate: <b style="color:var(--green)">94.2%</b></div>
+            <div>Quarantined / Tampered: <b style="color:var(--red)" id="dash-high-count">0</b></div>
+            <div>Biometric Match Ratio: <b style="color:var(--blue)">98.1%</b></div>
+          </div>
+        </section>
+      </div>
+
+      <!-- Scanned Documents Table in Dashboard -->
+      <section class="card table-card" style="margin-top: 16px;">
+        <div class="table-header">
+          <h3>RECENTLY SCANNED DOCUMENTS</h3>
+          <a href="#" id="refresh-table">Refresh</a>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Document ID</th><th>Type</th><th>Name</th><th>Nationality</th>
+              <th>Risk Score</th><th>Risk Level</th><th>Status</th><th>Scanned At</th>
+            </tr>
+          </thead>
+          <tbody id="doc-table-body"></tbody>
+        </table>
+      </section>
+    </div>
+
+    <!-- VIEW 2: DEDICATED SCAN DOCUMENT VIEW -->
+    <div id="view-scan-doc" class="app-view" style="display: none;">
+      <div class="grid-top">
+        <section class="card">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <h3 style="margin:0;">DOCUMENT UPLOAD &amp; PREVIEW</h3>
+            <span class="doc-badge">Multi-Document AI</span>
+          </div>
+          <div class="preview-box" id="preview-box">
+            <div class="preview-placeholder" id="preview-placeholder">Upload a document to preview it here</div>
+            <img id="preview-img" style="display:none;" />
+            <div class="mrz-strip" id="mrz-strip" style="display:none;"></div>
+          </div>
+          <div class="upload-actions">
+            <label class="btn-primary">
+              📤 Upload Document
+              <input type="file" id="file-input" accept="image/*" hidden />
+            </label>
+            <button type="button" class="btn-secondary" id="btn-open-camera">📷 Take Live Photo</button>
+            <button type="button" class="btn-clear" id="btn-clear">✕ Clear</button>
+          </div>
+          <div id="live-face-name" class="hint"></div>
+        </section>
+
+        <section class="card">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <h3 style="margin:0;">ANALYSIS SUMMARY</h3>
+            <span class="doc-badge">6 Forensic Checks</span>
+          </div>
+          <div id="analysis-list" class="analysis-list">
+            <div class="analysis-empty">Upload or capture a document to begin screening.</div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <h3 style="margin:0;">EXTRACTED INFORMATION</h3>
+            <span class="doc-badge" id="doc-type-badge">No Document</span>
+          </div>
+          <div id="extracted-grid" class="extracted-grid">
+            <div class="analysis-empty">No document scanned yet.</div>
+          </div>
+        </section>
+      </div>
+
+      <div class="grid-bottom" style="margin-top: 16px;">
+        <section class="card">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <h3 style="margin:0;">RISK SCORE</h3>
+            <span class="doc-badge">Aggregated Weight Engine</span>
+          </div>
+          <div class="gauge-wrap">
+            <canvas id="gauge" width="220" height="130"></canvas>
+            <div class="gauge-score" id="gauge-score">--/100</div>
+            <div class="gauge-level" id="gauge-level">NO SCAN YET</div>
+          </div>
+          <div class="risk-factors" id="risk-factors"></div>
+          <div class="recommendation">
+            <span class="rec-label">RECOMMENDATION</span>
+            <div class="rec-value" id="recommendation">Upload a document to begin</div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <h3 style="margin:0;">EVIDENCE / SUSPICIOUS AREAS</h3>
+            <span class="doc-badge">ELA &amp; Biometric Mapping</span>
+          </div>
+          <div class="evidence-box" id="evidence-box">
+            <div class="analysis-empty">No evidence overlay yet.</div>
+          </div>
+          <div class="legend">
+            <span><span class="dot red"></span> High Suspicion</span>
+            <span><span class="dot orange"></span> Medium Anomaly</span>
+            <span><span class="dot yellow"></span> Feature Zone</span>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <!-- VIEW 2: ALL DOCUMENTS -->
+    <div id="view-all-docs" class="app-view" style="display:none;">
+      <div class="card">
+        <div class="table-header" style="margin-bottom:16px;">
+          <h3 style="margin:0;">ALL PROCESSED DOCUMENTS REPOSITORY</h3>
+          <input type="text" id="filter-all-docs" placeholder="Search by name, ID or type..." class="input-search" />
+        </div>
+        <table>
+          <thead>
+            <tr><th>Document ID</th><th>Type</th><th>Name</th><th>Nationality</th><th>Risk Score</th><th>Risk Level</th><th>Scanned At</th></tr>
+          </thead>
+          <tbody id="all-docs-table-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- VIEW 3: RISK ALERTS -->
+    <div id="view-risk-alerts" class="app-view" style="display:none;">
+      <div class="card">
+        <h3 style="color:var(--red); margin-top:0;">HIGH RISK &amp; SECURITY ALERTS</h3>
+        <p style="color:var(--muted); font-size:12px; margin-bottom:16px;">Real-time queue of flagged travel documents requiring secondary inspection.</p>
+        <div id="alerts-container" class="alerts-grid"></div>
+      </div>
+    </div>
+
+    <!-- VIEW 4: WATCHLIST -->
+    <div id="view-watchlist" class="app-view" style="display:none;">
+      <div class="card">
+        <h3 style="margin-top:0;">BORDER SECURITY WATCHLIST REGISTRY</h3>
+        <div class="form-row" style="display:flex; gap:10px; margin-bottom:16px;">
+          <input type="text" id="watch-name" placeholder="Suspect Full Name" class="input-search" style="flex:1;" />
+          <input type="text" id="watch-reason" placeholder="Reason / Offense Tag" class="input-search" style="flex:1.5;" />
+          <button type="button" id="btn-add-watchlist" class="btn-primary" style="padding:8px 18px;">+ Add Suspect</button>
+        </div>
+        <table>
+          <thead><tr><th>#</th><th>Suspect Name</th><th>Reason / Notice</th><th>Date Added</th><th>Action</th></tr></thead>
+          <tbody id="watchlist-table-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- VIEW 5: REPORTS & ANALYTICS -->
+    <div id="view-reports" class="app-view" style="display:none;">
+      <div class="grid-bottom" style="margin-top:0;">
+        <div class="card">
+          <h3 style="margin-top:0;">SCREENING VOLUME OVERVIEW</h3>
+          <div id="analytics-summary" style="padding:15px; font-size:13px; line-height:2.2;"></div>
+        </div>
+        <div class="card">
+          <h3 style="margin-top:0;">RISK SEVERITY BREAKDOWN</h3>
+          <div id="analytics-bars" style="padding:15px; font-size:13px; line-height:2.2;"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- VIEW 6: DATABASE CHECK -->
+    <div id="view-database-check" class="app-view" style="display: none;">
+      <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 8px;">
+          <h3 style="margin:0;">MANUAL DATABASE VERIFICATION</h3>
+          <span class="doc-badge">Central Registry Lookup</span>
+        </div>
+        <p style="color:var(--muted); font-size:12px; margin-bottom:16px;">
+          Query central border records directly by Document ID, Citizen Name, or Passport/Aadhaar number.
+        </p>
+
+        <div style="display:flex; gap:10px; margin-bottom:20px;">
+          <input type="text" id="db-search-input" placeholder="Enter Name or ID (e.g. DOC-1284, Ujjwal, or 7245)..." 
+                 style="flex:1; padding:12px 14px; background:var(--panel-2); border:1px solid var(--border); border-radius:8px; color:#fff; font-size:13px; outline:none;" />
+          <button type="button" id="btn-db-search" class="btn-primary" style="padding:12px 24px;">
+            🔍 Search Database
+          </button>
+        </div>
+
+        <!-- Search Results Container -->
+        <div id="db-search-results">
+          <div class="analysis-empty">Enter a query above to verify records against the border database.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- VIEW 7: RULE ENGINE -->
+    <div id="view-rules" class="app-view" style="display:none;">
+      <div class="card" style="max-width:600px;">
+        <h3 style="margin-top:0;">FORENSIC RISK SCORING WEIGHTS</h3>
+        <p style="color:var(--muted); font-size:12px; margin-bottom:16px;">Adjust risk penalty weights assigned by the automated analysis matrix.</p>
+        <div class="form-group"><label>Tampering / Alteration Weight (pts)</label><input type="number" id="rule-tamper" value="65" /></div>
+        <div class="form-group"><label>Biometric Face Mismatch Weight (pts)</label><input type="number" id="rule-face" value="25" /></div>
+        <div class="form-group"><label>MRZ Mismatch Weight (pts)</label><input type="number" id="rule-mrz" value="20" /></div>
+        <div class="form-group"><label>Expiry Issue Weight (pts)</label><input type="number" id="rule-expiry" value="10" /></div>
+        <button type="button" id="btn-save-rules" class="btn-primary" style="margin-top:10px; width:100%;">💾 Save Risk Rules</button>
+      </div>
+    </div>
+
+    <!-- VIEW 8: AUDIT LOGS -->
+    <div id="view-audit" class="app-view" style="display:none;">
+      <div class="card">
+        <h3 style="margin-top:0;">SECURITY AUDIT TRAIL</h3>
+        <table>
+          <thead><tr><th>Log ID</th><th>Event / Action</th><th>Officer</th><th>Timestamp</th></tr></thead>
+          <tbody id="audit-table-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- VIEW 9: USERS & ROLES -->
+    <div id="view-users" class="app-view" style="display:none;">
+      <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+          <div>
+            <h3 style="margin:0;">AUTHORIZED BORDER PERSONNEL &amp; ACCESS ROLES</h3>
+            <p style="color:var(--muted); font-size:12px; margin:4px 0 0 0;">Manage terminal clearance levels, role credentials, and active border security officers.</p>
+          </div>
+          <button type="button" class="btn-primary" id="btn-show-enroll-user" style="padding: 8px 16px; font-size: 12px;">+ Enroll New Officer</button>
+        </div>
+
+        <!-- Enroll Officer Form (Collapsible) -->
+        <div id="enroll-user-card" style="display:none; background:var(--panel-2); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:18px;">
+          <div style="font-weight:700; color:#fff; font-size:13px; margin-bottom:12px;">👮 Enroll Authorized Border Personnel</div>
+          <div style="display:grid; grid-template-columns: 1fr 1.5fr 1fr auto; gap:10px; align-items:end;">
+            <div class="form-group" style="margin:0;">
+              <label>Officer Username</label>
+              <input type="text" id="new-user-username" placeholder="e.g. officer_sharma" />
+            </div>
+            <div class="form-group" style="margin:0;">
+              <label>Full Name</label>
+              <input type="text" id="new-user-fullname" placeholder="e.g. Inspector R. Sharma" />
+            </div>
+            <div class="form-group" style="margin:0;">
+              <label>Clearance Role</label>
+              <select id="new-user-role" style="background:var(--bg); border:1px solid var(--border); color:#fff; padding:9px 12px; border-radius:6px; font-size:12px; width:100%; outline:none;">
+                <option value="OFFICER">Border Officer</option>
+                <option value="SENIOR_INSPECTOR">Senior Inspector</option>
+                <option value="ANALYST">Forensic Analyst</option>
+                <option value="ADMIN">System Administrator</option>
+              </select>
+            </div>
+            <button type="button" id="btn-save-new-user" class="btn-primary" style="padding:9px 18px; height:38px;">Save Officer</button>
+          </div>
+        </div>
+
+        <table>
+          <thead><tr><th>#</th><th>Username</th><th>Full Name</th><th>Role Clearance</th><th>Status</th><th>Last Active</th><th>Action</th></tr></thead>
+          <tbody id="users-table-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- VIEW 10: SYSTEM SETTINGS & DIAGNOSTICS -->
+    <div id="view-settings" class="app-view" style="display:none;">
+      <div class="grid-bottom" style="margin-top:0;">
+        <div class="card">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+            <h3 style="margin:0;">AI ENGINES &amp; NEURAL PIPELINES</h3>
+            <span class="tag VALID">ALL SYSTEMS OPERATIONAL</span>
+          </div>
+          <div style="display:flex; flex-direction:column; gap:12px; font-size:12.5px; margin-top:14px;">
+            <div style="background:var(--panel-2); padding:12px; border-radius:8px; border:1px solid var(--border); display:flex; justify-content:space-between; align-items:center;">
+              <div>
+                <div style="font-weight:700; color:#fff;">OCR &amp; Text Parsing Pipeline</div>
+                <div style="color:var(--muted); font-size:11px;">RapidOCR ONNX + Tesseract 5.3 + Dual-Regex Syntax Engine</div>
+              </div>
+              <span class="tag VALID">Active (120ms)</span>
+            </div>
+            <div style="background:var(--panel-2); padding:12px; border-radius:8px; border:1px solid var(--border); display:flex; justify-content:space-between; align-items:center;">
+              <div>
+                <div style="font-weight:700; color:#fff;">Biometric Verification Engine</div>
+                <div style="color:var(--muted); font-size:11px;">Zero-Mean Identity HOG + Normalized Landmark Cross-Correlation</div>
+              </div>
+              <span class="tag VALID">Calibrated (97% Conf.)</span>
+            </div>
+            <div style="background:var(--panel-2); padding:12px; border-radius:8px; border:1px solid var(--border); display:flex; justify-content:space-between; align-items:center;">
+              <div>
+                <div style="font-weight:700; color:#fff;">Forensic Tampering &amp; ELA Mapping</div>
+                <div style="color:var(--muted); font-size:11px;">12x12 Micro-Grid Compression Anomaly + Sensor Noise Filter</div>
+              </div>
+              <span class="tag VALID">Active</span>
+            </div>
+            <div style="background:var(--panel-2); padding:12px; border-radius:8px; border:1px solid var(--border); display:flex; justify-content:space-between; align-items:center;">
+              <div>
+                <div style="font-weight:700; color:#fff;">Central Watchlist &amp; Database</div>
+                <div style="color:var(--muted); font-size:11px;">SQLite 3 WAL Mode • 351 Screened Documents Indexed</div>
+              </div>
+              <span class="tag VALID">Synced</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3 style="margin-top:0;">ADMINISTRATIVE MAINTENANCE &amp; DATA CONTROLS</h3>
+          <div style="display:flex; flex-direction:column; gap:14px; margin-top:14px;">
+            <div style="background:var(--panel-2); padding:14px; border-radius:8px; border:1px solid var(--border);">
+              <div style="font-weight:700; color:#fff; margin-bottom:4px;">🧹 Database Optimization &amp; Integrity Check</div>
+              <div style="color:var(--muted); font-size:12px; margin-bottom:10px;">Re-index tables, vacuum fragmented pages, and verify database integrity.</div>
+              <button type="button" class="btn-primary" id="btn-vacuum-db" style="padding:7px 16px; font-size:12px;">Run VACUUM &amp; Optimize</button>
+              <span id="vacuum-status-msg" style="margin-left:10px; font-size:12px; color:var(--green); font-weight:600;"></span>
+            </div>
+
+            <div style="background:var(--panel-2); padding:14px; border-radius:8px; border:1px solid var(--border);">
+              <div style="font-weight:700; color:#fff; margin-bottom:4px;">💾 Download Live SQLite Database Backup</div>
+              <div style="color:var(--muted); font-size:12px; margin-bottom:10px;">Export a standalone, byte-exact copy of the current border intelligence database.</div>
+              <a href="http://localhost:5000/api/admin/backup-db" target="_blank" class="btn-referral" style="text-decoration:none; padding:7px 16px; font-size:12px;">📥 Download .DB Backup</a>
+            </div>
+
+            <div style="background:var(--panel-2); padding:14px; border-radius:8px; border:1px solid var(--border);">
+              <div style="font-weight:700; color:#fff; margin-bottom:4px;">📊 Export Intelligence Summary Report</div>
+              <div style="color:var(--muted); font-size:12px; margin-bottom:10px;">Download complete spreadsheet audit of all processed travel documents.</div>
+              <div style="display:flex; gap:10px;">
+                <a href="http://localhost:5000/api/admin/export-report?format=csv" target="_blank" class="btn-referral" style="text-decoration:none; padding:7px 14px; font-size:12px;">Download CSV Report</a>
+                <a href="http://localhost:5000/api/admin/export-report?format=json" target="_blank" class="btn-referral secondary" style="text-decoration:none; padding:7px 14px; font-size:12px;">Download JSON Dataset</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- System Administrator Command Center Modal -->
+<div id="admin-profile-modal" class="modal" style="display: none;">
+  <div class="shift-modal-card" style="max-width: 680px;">
+    <div class="modal-header">
+      <div style="display: flex; align-items: center; gap: 10px;">
+        <span style="font-size: 26px;">🛡️</span>
+        <div>
+          <div style="font-size: 16px; font-weight: 700; color: #fff;">SYSTEM ADMINISTRATOR COMMAND CENTER</div>
+          <div style="font-size: 12px; color: var(--muted);">Border Security Intelligence Unit • Terminal Clearance Level 5</div>
+        </div>
+      </div>
+      <button type="button" class="btn-close-modal" id="btn-close-admin-modal">✕</button>
+    </div>
+
+    <!-- Admin Profile Badge -->
+    <div style="background: linear-gradient(90deg, rgba(59,130,246,0.15) 0%, rgba(30,41,59,0.5) 100%); border: 1px solid rgba(59,130,246,0.3); border-radius: 10px; padding: 16px; margin: 16px 0; display: flex; align-items: center; justify-content: space-between;">
+      <div style="display: flex; align-items: center; gap: 14px;">
+        <div style="font-size: 38px; background: rgba(0,0,0,0.3); padding: 8px; border-radius: 50%;">👤</div>
+        <div>
+          <div style="font-size: 15px; font-weight: 800; color: #fff;">System Administrator</div>
+          <div style="font-size: 11.5px; color: #60a5fa; font-weight: 600;">ID: BSF-INTEL-8492 • COMMAND LEVEL 5</div>
+          <div style="font-size: 11px; color: var(--muted);">Active Node: IN-BORDER-GW-01 (Online)</div>
+        </div>
+      </div>
+      <span class="tag VALID" style="padding: 6px 12px; font-weight: 700;">TOP SECRET</span>
+    </div>
+
+    <!-- Quick Action Controls -->
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px;">
+      <div style="background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 14px;">
+        <div style="font-weight: 700; font-size: 13px; color: #fff; margin-bottom: 4px;">📥 Export Intelligence</div>
+        <div style="color: var(--muted); font-size: 11px; margin-bottom: 10px;">Download complete forensic database report.</div>
+        <a href="http://localhost:5000/api/admin/export-report?format=csv" target="_blank" class="btn-referral" style="text-decoration:none; padding:6px 12px; font-size:11.5px; display:inline-block;">Export CSV</a>
+      </div>
+
+      <div style="background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 14px;">
+        <div style="font-weight: 700; font-size: 13px; color: #fff; margin-bottom: 4px;">🧹 Optimize Database</div>
+        <div style="color: var(--muted); font-size: 11px; margin-bottom: 10px;">Run VACUUM &amp; integrity diagnostics.</div>
+        <button type="button" id="btn-admin-vacuum" class="btn-referral" style="padding:6px 12px; font-size:11.5px;">Run Optimize</button>
+      </div>
+    </div>
+
+    <!-- Password Rotation Box -->
+    <div style="background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 14px;">
+      <div style="font-weight: 700; font-size: 13px; color: #fff; margin-bottom: 6px;">🔑 Rotate Administrator Password</div>
+      <div style="display: flex; gap: 10px;">
+        <input type="password" id="admin-new-password" placeholder="Enter new security password..." style="flex:1; padding:8px 12px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:#fff; font-size:12px; outline:none;" />
+        <button type="button" id="btn-admin-change-pass" class="btn-primary" style="padding:8px 16px; font-size:12px;">Update Password</button>
+      </div>
+      <div id="admin-pass-msg" style="font-size:11.5px; margin-top:6px; display:none;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Camera Modal -->
+<div id="camera-modal" class="modal">
+  <div class="modal-content camera-modal-content">
+    <div class="modal-header">
+      <h4>📷 Biometric Live Face Capture</h4>
+      <span class="close-modal" id="btn-close-camera">&times;</span>
+    </div>
+    <div class="camera-container">
+      <video id="webcam-video" autoplay playsinline muted></video>
+      <div class="face-guide-oval"></div>
+      <canvas id="camera-canvas" style="display:none;"></canvas>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn-secondary" id="btn-cancel-camera">Cancel</button>
+      <button type="button" class="btn-primary" id="btn-snap-face">📸 Capture &amp; Verify</button>
+    </div>
+  </div>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>
