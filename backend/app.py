@@ -313,147 +313,158 @@ def database_check():
 
 @app.route("/api/scan", methods=["POST"])
 def scan_document():
-    if "document" not in request.files:
-        return jsonify({"error": "No document file uploaded"}), 400
+    try:
+        if "document" not in request.files:
+            return jsonify({"error": "No document file uploaded"}), 400
 
-    if "live_face" not in request.files or not request.files["live_face"].filename:
-        return jsonify({
-            "error": "Mandatory Biometric Face Capture required before processing document."
-        }), 400
+        if "live_face" not in request.files or not request.files["live_face"].filename:
+            return jsonify({
+                "error": "Mandatory Biometric Face Capture required before processing document."
+            }), 400
 
-    doc_file = request.files["document"]
-    live_file = request.files["live_face"]
+        doc_file = request.files["document"]
+        live_file = request.files["live_face"]
 
-    image = Image.open(doc_file.stream)
-    image.load()
-    live_image = Image.open(live_file.stream)
-    live_image.load()
+        try:
+            image = Image.open(doc_file.stream)
+            image.load()
+        except Exception as e:
+            return jsonify({"error": f"Invalid document image format: {str(e)}"}), 400
 
-    doc_code = db.next_doc_code()
-    saved_name = f"{doc_code}.jpg"
-    image.convert("RGB").save(os.path.join(UPLOAD_DIR, saved_name), "JPEG")
+        try:
+            live_image = Image.open(live_file.stream)
+            live_image.load()
+        except Exception as e:
+            return jsonify({"error": f"Invalid live face image format: {str(e)}"}), 400
 
-    analysis, extracted, evidence_regions = {}, {}, []
+        doc_code = db.next_doc_code()
+        saved_name = f"{doc_code}.jpg"
+        image.convert("RGB").save(os.path.join(UPLOAD_DIR, saved_name), "JPEG")
 
-    # 1. Fast Single-Pass OCR
-    ocr_res = ocr.extract_text_fast(image)
-    raw_ocr_text = ocr_res["text"]
-    
-    # 2. Document Classification & Field Parsing
-    mrz_lines = mrz.extract_mrz_lines(raw_ocr_text)
-    doc_type = document_extractor.detect_document_type(raw_ocr_text, mrz_lines)
-    
-    mrz_result = {"valid_format": False, "checksum_valid": False, "fields": {}, "errors": []}
-    if doc_type == "Passport":
-        if len(mrz_lines) == 2:
-            mrz_result = mrz.parse_td3(mrz_lines[0], mrz_lines[1])
-        extracted = document_extractor.extract_passport_fields(mrz_result)
-        analysis["mrz"] = {
-            "status": "VALID" if mrz_result["checksum_valid"] else "ALERT",
-            "detail": "MRZ checksum valid" if mrz_result["checksum_valid"] else "; ".join(mrz_result["errors"]) or "MRZ invalid"
-        }
-    elif doc_type == "PAN Card":
-        extracted = document_extractor.extract_pan_fields(raw_ocr_text)
-        analysis["mrz"] = {"status": "N/A", "detail": "MRZ not applicable to PAN Cards"}
-    elif doc_type == "Aadhaar Card":
-        extracted = document_extractor.extract_aadhaar_fields(raw_ocr_text)
-        analysis["mrz"] = {"status": "N/A", "detail": "MRZ not applicable to Aadhaar documents"}
-    else:
-        extracted = document_extractor.extract_generic_fields(raw_ocr_text, doc_type)
-        analysis["mrz"] = {"status": "N/A", "detail": "MRZ not detected for generic document"}
+        analysis, extracted, evidence_regions = {}, {}, []
 
-    # 3. Forensic Tampering Analysis
-    tamper_result = tamper.error_level_analysis(image, ocr_text=raw_ocr_text)
-    analysis["tampering"] = {
-        "status": "ALERT" if tamper_result["tampering_detected"] else "VALID",
-        "detail": tamper_result["detail"]
-    }
-    for r in tamper_result.get("suspicious_regions", []):
-        evidence_regions.append(r)
-
-    # 4. Mandatory Biometric Face Verification
-    match_data = face_match.compare_faces(image, live_image)
-    face_result = {**match_data, "compared": True}
-    
-    if match_data.get("doc_box"):
-        if match_data["match"]:
-            evidence_regions.append({
-                **match_data["doc_box"],
-                "severity": "low",
-                "label": f"Verified Portrait ({match_data['similarity']}%)"
-            })
+        # 1. Fast Single-Pass OCR
+        ocr_res = ocr.extract_text_fast(image)
+        raw_ocr_text = ocr_res["text"]
+        
+        # 2. Document Classification & Field Parsing
+        mrz_lines = mrz.extract_mrz_lines(raw_ocr_text)
+        doc_type = document_extractor.detect_document_type(raw_ocr_text, mrz_lines)
+        
+        mrz_result = {"valid_format": False, "checksum_valid": False, "fields": {}, "errors": []}
+        if doc_type == "Passport":
+            if len(mrz_lines) == 2:
+                mrz_result = mrz.parse_td3(mrz_lines[0], mrz_lines[1])
+            extracted = document_extractor.extract_passport_fields(mrz_result)
+            analysis["mrz"] = {
+                "status": "VALID" if mrz_result["checksum_valid"] else "ALERT",
+                "detail": "MRZ checksum valid" if mrz_result["checksum_valid"] else "; ".join(mrz_result["errors"]) or "MRZ invalid"
+            }
+        elif doc_type == "PAN Card":
+            extracted = document_extractor.extract_pan_fields(raw_ocr_text)
+            analysis["mrz"] = {"status": "N/A", "detail": "MRZ not applicable to PAN Cards"}
+        elif doc_type == "Aadhaar Card":
+            extracted = document_extractor.extract_aadhaar_fields(raw_ocr_text)
+            analysis["mrz"] = {"status": "N/A", "detail": "MRZ not applicable to Aadhaar documents"}
         else:
-            evidence_regions.append({
-                **match_data["doc_box"],
-                "severity": "high",
-                "label": f"Face Mismatch / Untrusted Portrait ({match_data['similarity']}%)"
-            })
+            extracted = document_extractor.extract_generic_fields(raw_ocr_text, doc_type)
+            analysis["mrz"] = {"status": "N/A", "detail": "MRZ not detected for generic document"}
 
-    analysis["face_verification"] = {
-        "status": "MATCH" if match_data["match"] else "ALERT",
-        "detail": match_data["reason"]
-    }
-
-    # 5. Document Integrity Assessment
-    if tamper_result["tampering_detected"]:
-        analysis["ocr"] = {"status": "ALERT", "detail": "Extraction compromised due to physical/digital alteration"}
-        analysis["document_validation"] = {"status": "ALERT", "detail": "Structural integrity failed (Tampering detected)"}
-    else:
-        ocr_ok = bool(raw_ocr_text.strip()) and (extracted.get("Full Name") not in ["UNKNOWN", "UNREADABLE"])
-        analysis["ocr"] = {
-            "status": "VALID" if ocr_ok else "ALERT",
-            "detail": f"{doc_type} recognized, fields extracted" if ocr_ok else "Text unreadable or incomplete"
+        # 3. Forensic Tampering Analysis
+        tamper_result = tamper.error_level_analysis(image, ocr_text=raw_ocr_text)
+        analysis["tampering"] = {
+            "status": "ALERT" if tamper_result["tampering_detected"] else "VALID",
+            "detail": tamper_result["detail"]
         }
-        analysis["document_validation"] = {
-            "status": "VALID" if doc_type != "Unknown" else "ALERT",
-            "detail": f"{doc_type} structure recognized" if doc_type != "Unknown" else "Unrecognized security structure"
+        for r in tamper_result.get("suspicious_regions", []):
+            evidence_regions.append(r)
+
+        # 4. Mandatory Biometric Face Verification
+        match_data = face_match.compare_faces(image, live_image)
+        face_result = {**match_data, "compared": True}
+        
+        if match_data.get("doc_box"):
+            if match_data["match"]:
+                evidence_regions.append({
+                    **match_data["doc_box"],
+                    "severity": "low",
+                    "label": f"Verified Portrait ({match_data['similarity']}%)"
+                })
+            else:
+                evidence_regions.append({
+                    **match_data["doc_box"],
+                    "severity": "high",
+                    "label": f"Face Mismatch / Untrusted Portrait ({match_data['similarity']}%)"
+                })
+
+        analysis["face_verification"] = {
+            "status": "MATCH" if match_data["match"] else "ALERT",
+            "detail": match_data["reason"]
         }
 
-    analysis["database_verification"] = {"status": "VALID", "detail": "Cleared against active Watchlist & Central Registry"}
+        # 5. Document Integrity Assessment
+        if tamper_result["tampering_detected"]:
+            analysis["ocr"] = {"status": "ALERT", "detail": "Extraction compromised due to physical/digital alteration"}
+            analysis["document_validation"] = {"status": "ALERT", "detail": "Structural integrity failed (Tampering detected)"}
+        else:
+            ocr_ok = bool(raw_ocr_text.strip()) and (extracted.get("Full Name") not in ["UNKNOWN", "UNREADABLE"])
+            analysis["ocr"] = {
+                "status": "VALID" if ocr_ok else "ALERT",
+                "detail": f"{doc_type} recognized, fields extracted" if ocr_ok else "Text unreadable or incomplete"
+            }
+            analysis["document_validation"] = {
+                "status": "VALID" if doc_type != "Unknown" else "ALERT",
+                "detail": f"{doc_type} structure recognized" if doc_type != "Unknown" else "Unrecognized security structure"
+            }
 
-    # 6. Risk Scoring
-    risk_result = risk.compute_risk(
-        doc_type=doc_type,
-        mrz_result=mrz_result,
-        tamper_result=tamper_result,
-        face_result=face_result,
-        expiry_flag=False,
-        db_match=True
-    )
+        analysis["database_verification"] = {"status": "VALID", "detail": "Cleared against active Watchlist & Central Registry"}
 
-    record = {
-        "doc_code": doc_code,
-        "doc_type": doc_type,
-        "full_name": extracted.get("Full Name", "UNKNOWN"),
-        "nationality": extracted.get("Nationality", "N/A"),
-        "risk_score": risk_result["score"],
-        "risk_level": risk_result["level"],
-        "status": "Completed",
-        "scanned_at": datetime.now().strftime("%d %b %Y, %I:%M %p"),
-        "extracted": extracted,
-        "analysis": analysis,
-        "evidence": evidence_regions,
-        "image_path": f"/uploads/{saved_name}"
-    }
-    doc_id = db.insert_document(record)
+        # 6. Risk Scoring
+        risk_result = risk.compute_risk(
+            doc_type=doc_type,
+            mrz_result=mrz_result,
+            tamper_result=tamper_result,
+            face_result=face_result,
+            expiry_flag=False,
+            db_match=True
+        )
 
-    manual_referral = {
-        "required": bool(not match_data["match"] or risk_result["score"] >= 30),
-        "reason": "Biometric face mismatch. In-person physical identity verification and secondary border officer inspection required." if not match_data["match"] else "Risk score threshold reached.",
-        "search_term": extracted.get("Full Name") or extracted.get("PAN Number") or extracted.get("Aadhaar Number") or doc_code
-    }
+        record = {
+            "doc_code": doc_code,
+            "doc_type": doc_type,
+            "full_name": extracted.get("Full Name", "UNKNOWN"),
+            "nationality": extracted.get("Nationality", "N/A"),
+            "risk_score": risk_result["score"],
+            "risk_level": risk_result["level"],
+            "status": "Completed",
+            "scanned_at": datetime.now().strftime("%d %b %Y, %I:%M %p"),
+            "extracted": extracted,
+            "analysis": analysis,
+            "evidence": evidence_regions,
+            "image_path": f"/uploads/{saved_name}"
+        }
+        doc_id = db.insert_document(record)
 
-    return jsonify({
-        "id": doc_id,
-        "doc_code": doc_code,
-        "document_type": doc_type,
-        "extracted": extracted,
-        "analysis": analysis,
-        "risk": risk_result,
-        "evidence": evidence_regions,
-        "manual_referral": manual_referral,
-        "image_path": f"/uploads/{saved_name}"
-    })
+        manual_referral = {
+            "required": bool(not match_data["match"] or risk_result["score"] >= 30),
+            "reason": "Biometric face mismatch. In-person physical identity verification and secondary border officer inspection required." if not match_data["match"] else "Risk score threshold reached.",
+            "search_term": extracted.get("Full Name") or extracted.get("PAN Number") or extracted.get("Aadhaar Number") or doc_code
+        }
+
+        return jsonify({
+            "id": doc_id,
+            "doc_code": doc_code,
+            "document_type": doc_type,
+            "extracted": extracted,
+            "analysis": analysis,
+            "risk": risk_result,
+            "evidence": evidence_regions,
+            "manual_referral": manual_referral,
+            "image_path": f"/uploads/{saved_name}"
+        })
+    except Exception as err:
+        print("Internal scan processing error:", err)
+        return jsonify({"error": f"Internal scan processing error: {str(err)}"}), 500
 
 @app.route("/uploads/<path:filename>")
 def serve_upload(filename):

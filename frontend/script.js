@@ -1,16 +1,54 @@
-const isSameOriginBackend = (
-  window.location.port === "5000" ||
-  window.location.origin.includes(":5000") ||
-  (!["localhost", "127.0.0.1"].includes(window.location.hostname) && !window.location.port)
+// Smart API Base URL Detection:
+// In Cloud Production (Render, Railway, Heroku, AWS EC2, VPS) or Flask Direct (port 5000):
+// Uses window.location.origin (same-origin API calls).
+// In Local Dev Static Server (e.g. VS Code Live Server on port 5500, 8000, 3000):
+// Connects to local Flask backend on port 5000.
+const isLocalDevServer = (
+  ["localhost", "127.0.0.1"].includes(window.location.hostname) && 
+  window.location.port !== "" && 
+  window.location.port !== "5000"
 );
 
-const API_BASE = isSameOriginBackend 
-  ? "" 
-  : `http://${window.location.hostname || "localhost"}:5000`;
+const API_BASE = isLocalDevServer
+  ? `http://${window.location.hostname}:5000`
+  : window.location.origin;
+
 let selectedDocFile = null;
 let pendingLiveFace = null;
 let isScanning = false;
 let cameraStream = null;
+
+// Safe Single-Consumption Response Parser
+// Guarantees response body stream is read EXACTLY ONCE to prevent "body stream already read" errors.
+async function parseApiResponse(res) {
+  const text = await res.text();
+  let json = null;
+  try {
+    json = JSON.parse(text);
+  } catch (e) {
+    json = null;
+  }
+
+  let errorMessage = null;
+  if (!res.ok) {
+    if (json && (json.error || json.message)) {
+      errorMessage = json.error || json.message;
+    } else if (text && text.length > 0 && text.length < 250 && !text.startsWith("<!DOCTYPE")) {
+      errorMessage = text;
+    } else {
+      errorMessage = `Server Error (HTTP ${res.status}: ${res.statusText || 'Request Failed'})`;
+    }
+  }
+
+  return {
+    ok: res.ok,
+    status: res.status,
+    statusText: res.statusText,
+    data: json,
+    text: text,
+    error: errorMessage
+  };
+}
 
 // URL Cleanup
 if (window.location.search) {
@@ -43,15 +81,15 @@ async function doLogin(u, p) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username: u, password: p })
     });
-    const data = await res.json();
-    if (res.ok && data.status === "success") {
+    const parsed = await parseApiResponse(res);
+    if (parsed.ok && parsed.data && parsed.data.status === "success") {
       sessionStorage.setItem("border_doc_auth", "true");
       if (loginModal) loginModal.style.display = "none";
       loadStats();
       loadDocuments();
     } else {
       if (loginErrorBox) {
-        loginErrorBox.textContent = data.message || "Invalid credentials";
+        loginErrorBox.textContent = parsed.error || "Invalid officer credentials.";
         loginErrorBox.style.display = "block";
       }
     }
@@ -207,7 +245,7 @@ document.getElementById("btn-clear")?.addEventListener("click", () => {
   document.getElementById("evidence-box").innerHTML = `<div class="analysis-empty">No evidence overlay yet.</div>`;
 });
 
-// Scan Runner
+// Primary Document Scan Execution Runner
 async function executeScan() {
   if (isScanning || !selectedDocFile) return;
 
@@ -236,19 +274,22 @@ async function executeScan() {
 
   try {
     const res = await fetch(`${API_BASE}/api/scan`, { method: "POST", body: formData });
-    if (!res.ok) {
-      const errJson = await res.json().catch(() => ({}));
-      throw new Error(errJson.error || await res.text());
+    const parsed = await parseApiResponse(res);
+
+    if (!parsed.ok || !parsed.data) {
+      throw new Error(parsed.error || "Scan failed: Invalid server response.");
     }
-    const data = await res.json();
-    renderAnalysis(data);
+
+    renderAnalysis(parsed.data);
     await loadStats();
     await loadDocuments();
   } catch (err) {
     analysisList.innerHTML = `
       <div style="text-align:center; padding:20px;">
         <div style="color:#ef4444; font-weight:700; margin-bottom:6px;">⚠️ Scan Blocked / Failed</div>
-        <div style="color:var(--muted); font-size:12px;">${err.message}</div>
+        <div style="color:var(--muted); font-size:12px; max-width:420px; margin:0 auto; word-break:break-word;">
+          ${err.message || "An unexpected error occurred during processing."}
+        </div>
       </div>`;
   } finally {
     isScanning = false;
@@ -416,8 +457,9 @@ function drawGauge(score) {
 async function loadStats() {
   try {
     const res = await fetch(`${API_BASE}/api/stats`);
-    if (!res.ok) return;
-    const s = await res.json();
+    const parsed = await parseApiResponse(res);
+    if (!parsed.ok || !parsed.data) return;
+    const s = parsed.data;
 
     const setVal = (id, val) => {
       const el = document.getElementById(id);
@@ -509,12 +551,14 @@ setInterval(loadStats, 30000);
 async function loadDocuments() {
   try {
     const res = await fetch(`${API_BASE}/api/documents?limit=10`);
-    const rows = await res.json();
+    const parsed = await parseApiResponse(res);
+    if (!parsed.ok || !Array.isArray(parsed.data)) return;
+    const rows = parsed.data;
     const body = document.getElementById("doc-table-body");
     if (!body) return;
     body.innerHTML = "";
     rows.forEach((r) => {
-      const level = r.risk_level.replace(" Risk", "");
+      const level = (r.risk_level || "").replace(" Risk", "");
       body.innerHTML += `
         <tr>
           <td>${r.doc_code}</td><td>${r.doc_type}</td><td>${r.full_name}</td><td>${r.nationality}</td>
@@ -586,12 +630,14 @@ document.getElementById("refresh-table")?.addEventListener("click", (e) => {
 async function loadAllDocsTable() {
   try {
     const res = await fetch(`${API_BASE}/api/documents?limit=100`);
-    const rows = await res.json();
+    const parsed = await parseApiResponse(res);
+    if (!parsed.ok || !Array.isArray(parsed.data)) return;
+    const rows = parsed.data;
     const body = document.getElementById("all-docs-table-body");
     if (!body) return;
     body.innerHTML = "";
     rows.forEach((r) => {
-      const level = r.risk_level.replace(" Risk", "");
+      const level = (r.risk_level || "").replace(" Risk", "");
       body.innerHTML += `
         <tr>
           <td><b>${r.doc_code}</b></td><td>${r.doc_type}</td><td>${r.full_name}</td><td>${r.nationality}</td>
@@ -614,10 +660,11 @@ document.getElementById("filter-all-docs")?.addEventListener("input", (e) => {
 async function loadRiskAlertsView() {
   try {
     const res = await fetch(`${API_BASE}/api/documents?risk_level=HIGH&limit=50`);
-    const alerts = await res.json();
+    const parsed = await parseApiResponse(res);
+    const alerts = parsed.data;
     const container = document.getElementById("alerts-container");
     if (!container) return;
-    if (alerts.length === 0) {
+    if (!parsed.ok || !Array.isArray(alerts) || alerts.length === 0) {
       container.innerHTML = `<div class="analysis-empty">No high risk documents currently flagged.</div>`;
       return;
     }
@@ -638,9 +685,10 @@ async function loadRiskAlertsView() {
 async function loadWatchlistView() {
   try {
     const res = await fetch(`${API_BASE}/api/watchlist`);
-    const list = await res.json();
+    const parsed = await parseApiResponse(res);
+    const list = parsed.data;
     const body = document.getElementById("watchlist-table-body");
-    if (!body) return;
+    if (!body || !parsed.ok || !Array.isArray(list)) return;
     body.innerHTML = list.map(item => `
       <tr>
         <td>#${item.id}</td><td><b>${item.name}</b></td><td>${item.reason}</td><td>${item.added_at}</td>
@@ -673,22 +721,24 @@ document.getElementById("btn-add-watchlist")?.addEventListener("click", async ()
 async function loadReportsView() {
   try {
     const res = await fetch(`${API_BASE}/api/stats`);
-    const s = await res.json();
+    const parsed = await parseApiResponse(res);
+    if (!parsed.ok || !parsed.data) return;
+    const s = parsed.data;
     const sumEl = document.getElementById("analytics-summary");
     const barEl = document.getElementById("analytics-bars");
     if (sumEl) {
       sumEl.innerHTML = `
-        <div>Cumulative All-Time Processed: <b style="color:#fff;">${s.all_total}</b></div>
-        <div>Today's Shift Volume: <b style="color:var(--blue);">${s.today_total}</b></div>
-        <div>Previous Shift Baseline: <b style="color:var(--muted);">${s.previous_shift ? s.previous_shift.total : s.prev_shift_total}</b></div>
-        <div>Shift Active Date: <b style="color:var(--green);">${s.current_date}</b></div>
+        <div>Cumulative All-Time Processed: <b style="color:#fff;">${s.all_total || 0}</b></div>
+        <div>Today's Shift Volume: <b style="color:var(--blue);">${s.today_total || 0}</b></div>
+        <div>Previous Shift Baseline: <b style="color:var(--muted);">${s.previous_shift ? s.previous_shift.total : (s.prev_shift_total || 0)}</b></div>
+        <div>Shift Active Date: <b style="color:var(--green);">${s.current_date || 'Today'}</b></div>
       `;
     }
     if (barEl) {
       barEl.innerHTML = `
-        <div>High Risk Interceptions: <b style="color:var(--red);">${s.all_high} (${Math.round((s.all_high/Math.max(s.all_total,1))*100)}%)</b></div>
-        <div>Medium Risk Audits: <b style="color:var(--yellow);">${s.all_med} (${Math.round((s.all_med/Math.max(s.all_total,1))*100)}%)</b></div>
-        <div>Clean Clearances: <b style="color:var(--green);">${s.all_low} (${Math.round((s.all_low/Math.max(s.all_total,1))*100)}%)</b></div>
+        <div>High Risk Interceptions: <b style="color:var(--red);">${s.all_high || 0} (${Math.round(((s.all_high || 0)/Math.max(s.all_total || 1, 1))*100)}%)</b></div>
+        <div>Medium Risk Audits: <b style="color:var(--yellow);">${s.all_med || 0} (${Math.round(((s.all_med || 0)/Math.max(s.all_total || 1, 1))*100)}%)</b></div>
+        <div>Clean Clearances: <b style="color:var(--green);">${s.all_low || 0} (${Math.round(((s.all_low || 0)/Math.max(s.all_total || 1, 1))*100)}%)</b></div>
       `;
     }
   } catch (e) {}
@@ -713,9 +763,10 @@ async function executeDatabaseSearch() {
 
   try {
     const res = await fetch(`${API_BASE}/api/database-check?q=${encodeURIComponent(query)}`);
-    const data = await res.json();
+    const parsed = await parseApiResponse(res);
+    const data = parsed.data;
 
-    if (!data.results || data.results.length === 0) {
+    if (!parsed.ok || !data || !data.results || data.results.length === 0) {
       if (dbSearchResults) {
         dbSearchResults.innerHTML = `
           <div style="text-align:center; padding:30px; background:var(--panel-2); border-radius:8px; border:1px dashed var(--border);">
@@ -735,8 +786,8 @@ async function executeDatabaseSearch() {
     `;
 
     data.results.forEach((item) => {
-      const isHigh = item.risk_level.toUpperCase().includes("HIGH");
-      const chipClass = isHigh ? "High" : (item.risk_level.toUpperCase().includes("MED") ? "Medium" : "Low");
+      const isHigh = (item.risk_level || "").toUpperCase().includes("HIGH");
+      const chipClass = isHigh ? "High" : ((item.risk_level || "").toUpperCase().includes("MED") ? "Medium" : "Low");
 
       html += `
         <div style="background:var(--panel-2); border:1px solid var(--border); border-radius:10px; padding:16px; display:flex; justify-content:space-between; align-items:flex-start;">
@@ -783,7 +834,9 @@ if (dbSearchInput) {
 async function loadRulesView() {
   try {
     const res = await fetch(`${API_BASE}/api/rules`);
-    const r = await res.json();
+    const parsed = await parseApiResponse(res);
+    if (!parsed.ok || !parsed.data) return;
+    const r = parsed.data;
     if (document.getElementById("rule-tamper")) document.getElementById("rule-tamper").value = r.tampering || 65;
     if (document.getElementById("rule-face")) document.getElementById("rule-face").value = r.face_mismatch || 25;
     if (document.getElementById("rule-mrz")) document.getElementById("rule-mrz").value = r.mrz_mismatch || 20;
@@ -810,9 +863,10 @@ document.getElementById("btn-save-rules")?.addEventListener("click", async () =>
 async function loadAuditLogsView() {
   try {
     const res = await fetch(`${API_BASE}/api/audit-logs`);
-    const logs = await res.json();
+    const parsed = await parseApiResponse(res);
+    const logs = parsed.data;
     const body = document.getElementById("audit-table-body");
-    if (!body) return;
+    if (!body || !parsed.ok || !Array.isArray(logs)) return;
     body.innerHTML = logs.map(l => `
       <tr><td>#${l.id}</td><td><b>${l.event}</b></td><td>${l.user}</td><td>${l.timestamp}</td></tr>
     `).join("");
@@ -823,9 +877,10 @@ async function loadAuditLogsView() {
 async function loadUsersView() {
   try {
     const res = await fetch(`${API_BASE}/api/users`);
-    const users = await res.json();
+    const parsed = await parseApiResponse(res);
+    const users = parsed.data;
     const body = document.getElementById("users-table-body");
-    if (!body) return;
+    if (!body || !parsed.ok || !Array.isArray(users)) return;
     body.innerHTML = users.map(u => `
       <tr>
         <td>#${u.id}</td>
@@ -886,7 +941,7 @@ document.getElementById("btn-save-new-user")?.addEventListener("click", async ()
 async function loadDiagnosticsView() {
   try {
     const res = await fetch(`${API_BASE}/api/diagnostics/db`);
-    const d = await res.json();
+    const parsed = await parseApiResponse(res);
   } catch (e) {}
 }
 
@@ -900,9 +955,10 @@ async function executeVacuum(btnEl, msgEl) {
   }
   try {
     const res = await fetch(`${API_BASE}/api/admin/vacuum-db`, { method: "POST" });
-    const data = await res.json();
+    const parsed = await parseApiResponse(res);
+    const data = parsed.data || {};
     if (msgEl) {
-      msgEl.textContent = `✓ ${data.message} (${data.db_size_kb} KB)`;
+      msgEl.textContent = `✓ ${data.message || 'Optimized'} (${data.db_size_kb || 0} KB)`;
       msgEl.style.display = "inline";
     }
     if (btnEl) btnEl.textContent = "✓ Optimized";
@@ -963,10 +1019,11 @@ if (btnAdminChangePass) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ new_password: newPass })
       });
-      const d = await res.json();
-      if (res.ok) {
+      const parsed = await parseApiResponse(res);
+      const d = parsed.data || {};
+      if (parsed.ok) {
         if (adminPassMsg) {
-          adminPassMsg.textContent = `✓ ${d.message}`;
+          adminPassMsg.textContent = `✓ ${d.message || 'Updated successfully'}`;
           adminPassMsg.style.color = "var(--green)";
           adminPassMsg.style.display = "block";
         }
@@ -974,7 +1031,7 @@ if (btnAdminChangePass) {
         await loadAuditLogsView();
       } else {
         if (adminPassMsg) {
-          adminPassMsg.textContent = `⚠️ ${d.error || "Failed to update"}`;
+          adminPassMsg.textContent = `⚠️ ${parsed.error || "Failed to update"}`;
           adminPassMsg.style.color = "var(--red)";
           adminPassMsg.style.display = "block";
         }
