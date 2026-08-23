@@ -14,8 +14,13 @@ FRONTEND_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "frontend"))
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB max upload limit
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 db.init_db()
+
+@app.errorhandler(413)
+def request_entity_too_large(error):
+    return jsonify({"error": "Uploaded document image exceeds maximum size limit (32MB)."}), 413
 
 VALID_CREDENTIALS = {
     "admin": ["Admin@123", "AdminPassword123", "admin123"],
@@ -74,9 +79,14 @@ def login():
 
     return jsonify({"status": "error", "message": "Invalid Officer ID or Security Password"}), 401
 
+@app.route("/health", methods=["GET"])
 @app.route("/api/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({
+        "status": "ok",
+        "service": "border-doc-intel",
+        "timestamp": datetime.now().isoformat()
+    }), 200
 
 @app.route("/api/stats", methods=["GET"])
 def stats():
@@ -328,12 +338,23 @@ def scan_document():
         try:
             image = Image.open(doc_file.stream)
             image.load()
+            # Memory-Safe Auto Scale: Cap oversized images at 1600px to prevent container OOM crashes
+            max_doc_dim = 1600
+            if max(image.width, image.height) > max_doc_dim:
+                scale = max_doc_dim / float(max(image.width, image.height))
+                new_w, new_h = int(image.width * scale), int(image.height * scale)
+                image = image.resize((new_w, new_h), Image.Resampling.LANCZOS)
         except Exception as e:
             return jsonify({"error": f"Invalid document image format: {str(e)}"}), 400
 
         try:
             live_image = Image.open(live_file.stream)
             live_image.load()
+            max_live_dim = 1000
+            if max(live_image.width, live_image.height) > max_live_dim:
+                scale = max_live_dim / float(max(live_image.width, live_image.height))
+                new_w, new_h = int(live_image.width * scale), int(live_image.height * scale)
+                live_image = live_image.resize((new_w, new_h), Image.Resampling.LANCZOS)
         except Exception as e:
             return jsonify({"error": f"Invalid live face image format: {str(e)}"}), 400
 

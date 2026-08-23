@@ -1,7 +1,7 @@
 # Production Dockerfile for Border Document Intelligence System
 FROM python:3.11-slim-bookworm
 
-# Prevent Python from writing .pyc and enable unbuffered output
+# Prevent Python from writing .pyc and enable unbuffered logging
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PORT=5000
@@ -14,6 +14,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
     libgomp1 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    procps \
     curl \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -22,21 +26,22 @@ WORKDIR /app
 
 # Install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy backend and frontend source code
 COPY backend/ ./backend/
 COPY frontend/ ./frontend/
 
-# Ensure uploads folder exists with write permissions
+# Ensure uploads directory exists
 RUN mkdir -p backend/uploads
 
-# Expose server port
+# Expose default port
 EXPOSE 5000
 
-# Healthcheck
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:${PORT}/api/health || exit 1
+# Healthcheck for both /health and /api/health
+HEALTHCHECK --interval=20s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl -f http://localhost:${PORT}/api/health || curl -f http://localhost:${PORT}/health || exit 1
 
-# Start production server with Gunicorn
-CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT} --chdir backend app:app --workers 2 --threads 4 --timeout 120"]
+# Start production Gunicorn server with /dev/shm heartbeat and 180s timeout
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-5000} --chdir backend app:app --workers 2 --threads 4 --timeout 180 --worker-tmp-dir /dev/shm --access-logfile - --error-logfile -"]

@@ -33,8 +33,18 @@ async function parseApiResponse(res) {
   if (!res.ok) {
     if (json && (json.error || json.message)) {
       errorMessage = json.error || json.message;
-    } else if (text && text.length > 0 && text.length < 250 && !text.startsWith("<!DOCTYPE")) {
+    } else if (text && text.length > 0 && text.length < 250 && !text.startsWith("<!DOCTYPE") && !text.startsWith("<html")) {
       errorMessage = text;
+    } else if (res.status === 502) {
+      errorMessage = "HTTP 502 Bad Gateway: Upstream processing worker timed out or restarted. Please retry.";
+    } else if (res.status === 504) {
+      errorMessage = "HTTP 504 Gateway Timeout: Document scanning request timed out.";
+    } else if (res.status === 503) {
+      errorMessage = "HTTP 503 Service Unavailable: Intelligence server is temporarily busy.";
+    } else if (res.status === 413) {
+      errorMessage = "HTTP 413 Payload Too Large: Document image exceeds maximum 32MB upload size limit.";
+    } else if (res.status === 404) {
+      errorMessage = "HTTP 404 Not Found: Verification API endpoint unavailable on current origin.";
     } else {
       errorMessage = `Server Error (HTTP ${res.status}: ${res.statusText || 'Request Failed'})`;
     }
