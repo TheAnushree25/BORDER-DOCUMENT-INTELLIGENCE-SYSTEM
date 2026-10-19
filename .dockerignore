@@ -1,0 +1,13 @@
+.git
+.github
+**/__pycache__
+**/*.pyc
+.venv
+venv
+.env
+data/
+backend/uploads/
+backend/*.db
+backend/*.db-*
+tests/
+test_samples/

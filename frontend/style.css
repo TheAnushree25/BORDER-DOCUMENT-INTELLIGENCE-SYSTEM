@@ -415,3 +415,6 @@ td { padding: 9px 10px; border-bottom: 1px solid var(--border); }
 .delta-tag.warn b { color: var(--yellow); }
 
 
+
+/* Administrator-only controls are hidden for other roles (the API enforces this too) */
+body:not(.is-admin) .admin-only { display: none !important; }

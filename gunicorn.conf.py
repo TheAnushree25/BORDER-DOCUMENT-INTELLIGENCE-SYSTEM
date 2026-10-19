@@ -4,7 +4,9 @@ import os
 port = os.environ.get("PORT", "10000")
 bind = f"0.0.0.0:{port}"
 
-workers = int(os.environ.get("WEB_CONCURRENCY", "2"))
+# Each worker loads its own OCR and face models (~300 MB), so one worker fits a 512 MB instance.
+# Raise WEB_CONCURRENCY only on instances with 2 GB of RAM or more.
+workers = int(os.environ.get("WEB_CONCURRENCY", "1"))
 threads = int(os.environ.get("GUNICORN_THREADS", "4"))
 worker_class = "gthread"
 timeout = int(os.environ.get("GUNICORN_TIMEOUT", "180"))

@@ -1,99 +1,152 @@
-import os
-import sys
+import csv
+import io
 import json
-from datetime import datetime
+import os
+import re
+import sqlite3
+import sys
+import tempfile
+import threading
+from contextlib import closing
+from datetime import date, datetime, timedelta
+from functools import wraps
 
-# Multi-Path Environment Discovery (Root, Parent, Backend)
 CURRENT_DIR = os.path.abspath(os.path.dirname(__file__))
-PARENT_DIR = os.path.dirname(CURRENT_DIR)
-BACKEND_DIR = os.path.join(PARENT_DIR, "backend") if os.path.basename(CURRENT_DIR) != "backend" else CURRENT_DIR
+if CURRENT_DIR not in sys.path:
+    sys.path.insert(0, CURRENT_DIR)
 
-for p in [CURRENT_DIR, PARENT_DIR, BACKEND_DIR]:
-    if p and p not in sys.path and os.path.exists(p):
-        sys.path.insert(0, p)
+from flask import Flask, Response, g, jsonify, request, send_file, send_from_directory, session
+from PIL import Image, ImageOps
 
-from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS
-from PIL import Image
+import database as db
+from utils import document_extractor, face_match, mrz, ocr, risk, tamper
 
-# Robust Dual-Path Import Handling with Fallbacks
-try:
-    from utils import ocr, mrz, tamper, face_match, risk, document_extractor
-    import database as db
-except ImportError:
-    from backend.utils import ocr, mrz, tamper, face_match, risk, document_extractor
-    from backend import database as db
-
-UPLOAD_DIR = os.path.join(CURRENT_DIR, "uploads")
-FRONTEND_DIR = os.path.abspath(os.path.join(CURRENT_DIR, "..", "frontend")) if os.path.exists(os.path.join(CURRENT_DIR, "..", "frontend")) else os.path.abspath(os.path.join(CURRENT_DIR, "frontend"))
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+UPLOAD_DIR = db.UPLOAD_DIR
+FRONTEND_DIR = os.path.join(os.path.dirname(CURRENT_DIR), "frontend")
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB max upload limit
-CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+app.config.update(
+    MAX_CONTENT_LENGTH=32 * 1024 * 1024,  # 32 MB max upload limit
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get("SESSION_COOKIE_SECURE", "").lower() in ("1", "true", "yes"),
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
+)
 db.init_db()
+app.secret_key = os.environ.get("SECRET_KEY") or db.get_secret_key()
+
+# The OCR and face models are shared, stateful objects, so a worker runs one scan at a time.
+# This also caps peak memory on small (512 MB) instances.
+SCAN_LOCK = threading.Lock()
+
+PUBLIC_API_PATHS = {"/api/health", "/api/login", "/api/auth/login", "/api/auth/config"}
+ROLE_LABELS = {
+    "ADMIN": "System Administrator",
+    "SENIOR_INSPECTOR": "Senior Inspector",
+    "OFFICER": "Border Officer",
+    "ANALYST": "Forensic Analyst",
+}
+UNREADABLE = {"", "UNKNOWN", "UNREADABLE", "NOT DETECTED"}
+
+
+def client_ip():
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    return forwarded.split(",")[0].strip() or request.remote_addr
+
+
+def audit(action, details=None, username=None):
+    if username is None:
+        user = g.get("user")
+        username = user["username"] if user else "system"
+    db.add_audit(username, action, details=details, ip=client_ip())
+
+
+def user_payload(user):
+    return {**user, "role_label": ROLE_LABELS.get(user["role"], user["role"]), "unit": "Border Security Intelligence Unit"}
+
+
+def admin_required(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if g.user["role"] != "ADMIN":
+            return jsonify({"error": "Administrator access required"}), 403
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+@app.before_request
+def require_login():
+    path = request.path
+    protected = (path.startswith("/api/") and path not in PUBLIC_API_PATHS) or path.startswith("/uploads/")
+    if not protected:
+        return None
+    user = db.get_user(session["uid"]) if session.get("uid") else None
+    if not user or not user["active"]:
+        if session.get("uid"):
+            session.clear()
+        return jsonify({"error": "Authentication required"}), 401
+    g.user = user
+    return None
+
 
 @app.errorhandler(413)
 def request_entity_too_large(error):
     return jsonify({"error": "Uploaded document image exceeds maximum size limit (32MB)."}), 413
 
-VALID_CREDENTIALS = {
-    "admin": ["Admin@123", "AdminPassword123", "admin123"],
-    "officer": ["Admin@123", "officer123"]
-}
 
-# In-memory Watchlist, Audit Logs, Rules, and Users persistence
-WATCHLIST = [
-    {"id": 1, "name": "VIKRAM SINGH", "reason": "Interpol Red Notice", "added_at": "12 Aug 2026"},
-    {"id": 2, "name": "JOHN CONNOR", "reason": "Document Forgery Suspect", "added_at": "18 Aug 2026"},
-    {"id": 3, "name": "TARIQ AL-MANSOOR", "reason": "Visa Fraud Flag", "added_at": "20 Aug 2026"}
-]
+# ---------------------------------------------------------------- authentication
 
-AUDIT_LOGS = [
-    {"id": 101, "event": "Officer Login", "user": "admin", "timestamp": "23 Aug 2026, 10:14 AM"},
-    {"id": 102, "event": "Scan Executed", "user": "admin", "timestamp": "23 Aug 2026, 10:16 AM"}
-]
-
-RULE_WEIGHTS = {
-    "tampering": 65,
-    "face_mismatch": 25,
-    "mrz_mismatch": 20,
-    "expiry_issue": 10
-}
-
-USERS_LIST = [
-    {"id": 1, "username": "admin", "full_name": "System Administrator", "role": "ADMIN", "active": True, "last_login": "Just now"},
-    {"id": 2, "username": "officer_1", "full_name": "Border Officer Verma", "role": "OFFICER", "active": True, "last_login": "23 Aug 2026, 09:30 AM"},
-]
-
-@app.route("/api/login", methods=["POST", "OPTIONS"])
-@app.route("/api/auth/login", methods=["POST", "OPTIONS"])
+@app.route("/api/login", methods=["POST"])
+@app.route("/api/auth/login", methods=["POST"])
 def login():
-    if request.method == "OPTIONS":
-        return jsonify({"status": "ok"}), 200
-
     data = request.get_json(silent=True) or request.form.to_dict() or {}
     username = str(data.get("username", "")).strip().lower()
     password = str(data.get("password", "")).strip()
 
-    if username in VALID_CREDENTIALS and password in VALID_CREDENTIALS[username]:
-        AUDIT_LOGS.insert(0, {
-            "id": len(AUDIT_LOGS) + 1,
-            "event": f"Officer Login: {username}",
-            "user": username,
-            "timestamp": datetime.now().strftime("%d %b %Y, %I:%M %p")
-        })
-        return jsonify({
-            "status": "success",
-            "message": "Authenticated successfully",
-            "user": {
-                "username": username,
-                "role": "System Administrator",
-                "unit": "Border Security Intelligence Unit"
-            }
-        }), 200
+    user = db.verify_login(username, password) if username and password else None
+    if not user:
+        audit("Failed Login Attempt", username=username or "unknown")
+        return jsonify({"status": "error", "message": "Invalid Officer ID or Security Password"}), 401
 
-    return jsonify({"status": "error", "message": "Invalid Officer ID or Security Password"}), 401
+    session.clear()
+    session.permanent = True
+    session["uid"] = user["id"]
+    db.touch_last_login(user["id"])
+    audit(f"Officer Login: {user['username']}", username=user["username"])
+    return jsonify({"status": "success", "message": "Authenticated successfully", "user": user_payload(user)}), 200
+
+
+@app.route("/api/auth/logout", methods=["POST"])
+def logout():
+    audit(f"Officer Logout: {g.user['username']}")
+    session.clear()
+    return jsonify({"status": "success"})
+
+
+@app.route("/api/auth/me", methods=["GET"])
+def current_user():
+    return jsonify({"user": user_payload(g.user)})
+
+
+@app.route("/api/auth/config", methods=["GET"])
+def auth_config():
+    # The one-click demo login is offered only while the admin still uses the published default password.
+    return jsonify({"demo_login": db.demo_login_enabled()})
+
+
+@app.route("/api/auth/change-password", methods=["POST"])
+@app.route("/api/admin/change-password", methods=["POST"])
+def change_password():
+    data = request.get_json(silent=True) or {}
+    current = str(data.get("current_password", "")).strip()
+    new_pass = str(data.get("new_password", "")).strip()
+    if len(new_pass) < 6:
+        return jsonify({"error": "Password must be at least 6 characters"}), 400
+    if not db.change_password(g.user["id"], current, new_pass):
+        return jsonify({"error": "Current password is incorrect"}), 403
+    audit("Security Password Rotated")
+    return jsonify({"status": "success", "message": "Security password updated successfully."})
+
 
 @app.route("/health", methods=["GET"])
 @app.route("/api/health", methods=["GET"])
@@ -104,207 +157,204 @@ def health():
         "timestamp": datetime.now().isoformat()
     }), 200
 
+
+# ---------------------------------------------------------------- dashboard data
+
 @app.route("/api/stats", methods=["GET"])
 def stats():
     return jsonify(db.get_stats())
 
+
 @app.route("/api/documents", methods=["GET"])
 def documents():
-    limit = int(request.args.get("limit", 50))
-    offset = int(request.args.get("offset", 0))
-    risk_level = request.args.get("risk_level")
-    rows = db.list_documents(limit=limit, offset=offset, risk_level=risk_level)
+    limit = max(1, min(request.args.get("limit", 50, type=int), 500))
+    offset = max(0, request.args.get("offset", 0, type=int))
+    rows = db.list_documents(limit=limit, offset=offset, risk_level=request.args.get("risk_level"))
     return jsonify(rows)
+
 
 @app.route("/api/watchlist", methods=["GET", "POST", "DELETE"])
 def handle_watchlist():
-    global WATCHLIST
     if request.method == "GET":
-        return jsonify(WATCHLIST)
-    elif request.method == "POST":
-        data = request.get_json(silent=True) or {}
-        new_entry = {
-            "id": len(WATCHLIST) + 1,
-            "name": str(data.get("name", "")).strip().upper(),
-            "reason": str(data.get("reason", "Suspicious Activity")),
-            "added_at": datetime.now().strftime("%d %b %Y")
-        }
-        WATCHLIST.append(new_entry)
-        AUDIT_LOGS.insert(0, {
-            "id": len(AUDIT_LOGS) + 1,
-            "event": f"Watchlist Added: {new_entry['name']}",
-            "user": "admin",
-            "timestamp": datetime.now().strftime("%d %b %Y, %I:%M %p")
-        })
-        return jsonify(new_entry), 201
-    elif request.method == "DELETE":
-        item_id = request.args.get("id", type=int)
-        if item_id:
-            WATCHLIST = [w for w in WATCHLIST if w["id"] != item_id]
-        return jsonify({"status": "success", "watchlist": WATCHLIST})
+        return jsonify(db.list_watchlist())
+    if request.method == "DELETE":  # legacy form: DELETE /api/watchlist?id=3
+        return delete_watchlist_item(request.args.get("id", type=int))
+
+    data = request.get_json(silent=True) or {}
+    name = " ".join(str(data.get("name", "")).split()).upper()
+    if not name:
+        return jsonify({"error": "Suspect name is required"}), 400
+    reason = str(data.get("reason", "")).strip() or "Suspicious Activity"
+    document_number = str(data.get("document_number", "")).strip().upper() or None
+    entry = db.add_watchlist(name[:120], reason[:200], document_number)
+    audit(f"Watchlist Added: {entry['name']}")
+    return jsonify(entry), 201
+
 
 @app.route("/api/watchlist/<int:item_id>", methods=["DELETE"])
 def delete_watchlist_item(item_id):
-    global WATCHLIST
-    WATCHLIST = [w for w in WATCHLIST if w["id"] != item_id]
-    return jsonify({"status": "success", "watchlist": WATCHLIST})
+    if item_id:
+        db.delete_watchlist(item_id)
+        audit(f"Watchlist Removed: #{item_id}")
+    return jsonify({"status": "success", "watchlist": db.list_watchlist()})
+
 
 @app.route("/api/audit-logs", methods=["GET"])
 def get_audit_logs():
-    return jsonify(AUDIT_LOGS)
+    return jsonify(db.list_audit_logs())
 
-@app.route("/api/rules", methods=["GET", "POST"])
+
+@app.route("/api/rules", methods=["GET", "POST", "PUT"])
 def handle_rules():
-    global RULE_WEIGHTS
     if request.method == "GET":
-        return jsonify(RULE_WEIGHTS)
-    elif request.method == "POST":
-        RULE_WEIGHTS.update(request.get_json(silent=True) or {})
-        AUDIT_LOGS.insert(0, {
-            "id": len(AUDIT_LOGS) + 1,
-            "event": "Rule Engine Weights Updated",
-            "user": "admin",
-            "timestamp": datetime.now().strftime("%d %b %Y, %I:%M %p")
-        })
-        return jsonify({"status": "success", "rules": RULE_WEIGHTS})
+        return jsonify(db.get_rule_weights())
+    if g.user["role"] != "ADMIN":
+        return jsonify({"error": "Administrator access required"}), 403
+
+    data = request.get_json(silent=True) or {}
+    known = db.get_rule_weights()
+    updates = {}
+    for key, value in data.items():
+        if key not in known:
+            continue
+        try:
+            weight = int(value)
+        except (TypeError, ValueError):
+            return jsonify({"error": f"Weight for '{key}' must be a whole number"}), 400
+        if not 0 <= weight <= 100:
+            return jsonify({"error": f"Weight for '{key}' must be between 0 and 100"}), 400
+        updates[key] = weight
+    db.update_rule_weights(updates)
+    audit("Rule Engine Weights Updated", details=json.dumps(updates))
+    return jsonify({"status": "success", "rules": db.get_rule_weights()})
+
 
 @app.route("/api/users", methods=["GET", "POST"])
+@admin_required
 def handle_users():
-    global USERS_LIST
     if request.method == "GET":
-        return jsonify(USERS_LIST)
-    elif request.method == "POST":
-        data = request.get_json(silent=True) or {}
-        uname = str(data.get("username", "")).strip().lower()
-        if not uname:
-            return jsonify({"error": "Username is required"}), 400
-        new_u = {
-            "id": len(USERS_LIST) + 1,
-            "username": uname,
-            "full_name": str(data.get("full_name", "")).strip() or uname.capitalize(),
-            "role": str(data.get("role", "OFFICER")).upper(),
-            "active": True,
-            "last_login": datetime.now().strftime("%d %b %Y, %I:%M %p")
-        }
-        USERS_LIST.append(new_u)
-        AUDIT_LOGS.insert(0, {
-            "id": len(AUDIT_LOGS) + 1,
-            "event": f"New Officer Enrolled: {new_u['username']} ({new_u['role']})",
-            "user": "admin",
-            "timestamp": datetime.now().strftime("%d %b %Y, %I:%M %p")
-        })
-        return jsonify(new_u), 201
+        return jsonify(db.list_users())
+
+    data = request.get_json(silent=True) or {}
+    username = str(data.get("username", "")).strip().lower()
+    password = str(data.get("password", "")).strip()
+    full_name = str(data.get("full_name", "")).strip() or username.capitalize()
+    role = str(data.get("role", "OFFICER")).strip().upper()
+    if not re.fullmatch(r"[a-z0-9_.-]{3,32}", username):
+        return jsonify({"error": "Username must be 3-32 characters (letters, digits, _ . -)"}), 400
+    if len(password) < 6:
+        return jsonify({"error": "Password must be at least 6 characters"}), 400
+    if role not in db.ROLES:
+        return jsonify({"error": f"Unknown role '{role}'"}), 400
+    try:
+        new_user = db.create_user(username, password, full_name[:80], role)
+    except sqlite3.IntegrityError:
+        return jsonify({"error": f"Username '{username}' already exists"}), 409
+    audit(f"New Officer Enrolled: {username} ({role})")
+    return jsonify(new_user), 201
+
 
 @app.route("/api/users/<int:user_id>", methods=["DELETE"])
+@admin_required
 def delete_user(user_id):
-    global USERS_LIST
-    target = next((u for u in USERS_LIST if u["id"] == user_id), None)
-    if target:
-        USERS_LIST = [u for u in USERS_LIST if u["id"] != user_id]
-        AUDIT_LOGS.insert(0, {
-            "id": len(AUDIT_LOGS) + 1,
-            "event": f"Officer Revoked/Deleted: {target['username']}",
-            "user": "admin",
-            "timestamp": datetime.now().strftime("%d %b %Y, %I:%M %p")
-        })
+    target = db.get_user(user_id)
+    if not target:
+        return jsonify({"error": "User not found"}), 404
+    if target["username"] == "admin" or target["id"] == g.user["id"]:
+        return jsonify({"error": "This account is protected and cannot be revoked"}), 400
+    db.delete_user(user_id)
+    audit(f"Officer Revoked/Deleted: {target['username']}")
     return jsonify({"status": "success"})
 
+
+# ---------------------------------------------------------------- administration
+
+def _csv_cell(value):
+    text = "" if value is None else str(value)
+    return "'" + text if text[:1] in ("=", "+", "-", "@") else text  # keep spreadsheet apps from running formulas
+
+
 @app.route("/api/admin/export-report", methods=["GET"])
+@admin_required
 def export_report():
     fmt = request.args.get("format", "json").lower()
     docs = db.list_documents(limit=500)
-    
-    AUDIT_LOGS.insert(0, {
-        "id": len(AUDIT_LOGS) + 1,
-        "event": f"Intelligence Report Exported ({fmt.upper()})",
-        "user": "admin",
-        "timestamp": datetime.now().strftime("%d %b %Y, %I:%M %p")
-    })
+    audit(f"Intelligence Report Exported ({fmt.upper()})")
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     if fmt == "csv":
-        import io, csv
-        from flask import Response
         output = io.StringIO()
         writer = csv.writer(output)
         writer.writerow(["Document ID", "Type", "Full Name", "Nationality", "Risk Score", "Risk Level", "Status", "Scanned At"])
         for d in docs:
-            writer.writerow([d.get("doc_code"), d.get("doc_type"), d.get("full_name"), d.get("nationality"), d.get("risk_score"), d.get("risk_level"), d.get("status"), d.get("scanned_at")])
+            writer.writerow([_csv_cell(d.get(k)) for k in
+                             ("doc_code", "doc_type", "full_name", "nationality", "risk_score", "risk_level", "status", "scanned_at")])
         return Response(
             output.getvalue(),
             mimetype="text/csv",
-            headers={"Content-Disposition": f"attachment;filename=border_intelligence_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"}
+            headers={"Content-Disposition": f"attachment;filename=border_intelligence_report_{stamp}.csv"}
         )
-    return jsonify(docs)
+    return Response(
+        json.dumps(docs, indent=2),
+        mimetype="application/json",
+        headers={"Content-Disposition": f"attachment;filename=border_intelligence_report_{stamp}.json"}
+    )
+
 
 @app.route("/api/admin/vacuum-db", methods=["POST"])
+@admin_required
 def vacuum_db():
-    conn = db.get_conn()
-    conn.execute("VACUUM")
-    conn.execute("ANALYZE")
-    conn.close()
-    
-    AUDIT_LOGS.insert(0, {
-        "id": len(AUDIT_LOGS) + 1,
-        "event": "Database Optimized & Vacuumed (Integrity OK)",
-        "user": "admin",
-        "timestamp": datetime.now().strftime("%d %b %Y, %I:%M %p")
-    })
-    
+    with closing(db.get_conn()) as conn:
+        integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+        conn.execute("VACUUM")
+        conn.execute("ANALYZE")
+    audit("Database Optimized & Vacuumed", details=f"integrity_check={integrity}")
+
     db_size = os.path.getsize(db.DB_PATH) if os.path.exists(db.DB_PATH) else 0
     return jsonify({
         "status": "success",
-        "message": "Database optimized, indexed, and verified intact.",
+        "message": "Database optimized, indexed, and verified intact." if integrity == "ok" else f"Integrity check reported: {integrity}",
         "db_size_kb": round(db_size / 1024, 1),
-        "integrity": "PASSED"
+        "integrity": "PASSED" if integrity == "ok" else "FAILED"
     })
 
-@app.route("/api/admin/change-password", methods=["POST"])
-def admin_change_password():
-    data = request.get_json(silent=True) or {}
-    new_pass = str(data.get("new_password", "")).strip()
-    if len(new_pass) < 6:
-        return jsonify({"error": "Password must be at least 6 characters"}), 400
-    
-    VALID_CREDENTIALS["admin"] = [new_pass]
-    AUDIT_LOGS.insert(0, {
-        "id": len(AUDIT_LOGS) + 1,
-        "event": "Admin Security Password Rotated",
-        "user": "admin",
-        "timestamp": datetime.now().strftime("%d %b %Y, %I:%M %p")
-    })
-    return jsonify({"status": "success", "message": "Security password updated successfully."})
 
 @app.route("/api/admin/backup-db", methods=["GET"])
+@admin_required
 def download_db_backup():
-    AUDIT_LOGS.insert(0, {
-        "id": len(AUDIT_LOGS) + 1,
-        "event": "Raw SQLite Database Backup Downloaded",
-        "user": "admin",
-        "timestamp": datetime.now().strftime("%d %b %Y, %I:%M %p")
-    })
-    return send_from_directory(
-        os.path.dirname(db.DB_PATH),
-        os.path.basename(db.DB_PATH),
+    # Use SQLite's online backup so the copy is consistent even while scans are being written.
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = os.path.join(tmp_dir, "backup.db")
+        with closing(db.get_conn()) as src, closing(sqlite3.connect(tmp_path)) as dst:
+            src.backup(dst)
+        with open(tmp_path, "rb") as f:
+            data = f.read()
+    audit("SQLite Database Backup Downloaded")
+    return send_file(
+        io.BytesIO(data),
+        mimetype="application/vnd.sqlite3",
         as_attachment=True,
         download_name=f"border_intel_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
     )
 
+
 @app.route("/api/diagnostics/db", methods=["GET"])
 def db_diagnostics():
-    stats_data = db.get_stats()
+    counts = db.table_counts()
     db_size = os.path.getsize(db.DB_PATH) if os.path.exists(db.DB_PATH) else 0
     return jsonify({
         "status": "ok",
-        "total_documents": stats_data["all_total"],
-        "today_documents": stats_data["today_total"],
-        "total_users": len(USERS_LIST),
-        "total_watchlist": len(WATCHLIST),
-        "total_audit_logs": len(AUDIT_LOGS),
+        "total_documents": counts["documents"],
+        "today_documents": db.get_stats()["today_total"],
+        "total_users": counts["users"],
+        "total_watchlist": counts["watchlist"],
+        "total_audit_logs": counts["audit_logs"],
         "db_size_kb": round(db_size / 1024, 1),
-        "tables": ["documents", "users", "watchlist", "audit_logs", "rules"],
-        "uptime": "99.98% High Availability",
-        "ai_engine_status": "All Forensic Neural Pipelines Online"
+        "tables": list(counts),
+        "tesseract_available": ocr.TESSERACT_AVAILABLE,
+        "neural_face_models": face_match._YUNET_AVAILABLE,
     })
+
 
 @app.route("/api/database-check", methods=["GET"])
 def database_check():
@@ -337,6 +387,9 @@ def database_check():
         "results": formatted
     })
 
+
+# ---------------------------------------------------------------- screening pipeline
+
 def sanitize_for_json(obj):
     """
     Recursively sanitize objects to guarantee 100% native Python JSON serializability.
@@ -354,192 +407,223 @@ def sanitize_for_json(obj):
         return obj.tolist()
     return str(obj)
 
+
+def load_image(stream, max_dim):
+    image = Image.open(stream)
+    image.load()
+    # Honour phone-camera rotation once, so OCR, forensics, face boxes and the saved evidence all agree.
+    image = ImageOps.exif_transpose(image).convert("RGB")
+    # Memory-Safe Auto Scale: cap oversized images to prevent container OOM crashes
+    if max(image.size) > max_dim:
+        image.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+    return image
+
+
+def parse_dmy(value):
+    try:
+        return datetime.strptime(value, "%d/%m/%Y").date()
+    except (TypeError, ValueError):
+        return None
+
+
 @app.route("/api/scan", methods=["POST"])
 def scan_document():
+    if "document" not in request.files:
+        return jsonify({"error": "No document file uploaded"}), 400
+
+    live_file = request.files.get("live_face")
     try:
-        if "document" not in request.files:
-            return jsonify({"error": "No document file uploaded"}), 400
+        image = load_image(request.files["document"].stream, max_dim=1280)
+    except Exception as e:
+        return jsonify({"error": f"Invalid document image format: {str(e)}"}), 400
 
-        doc_file = request.files["document"]
-        has_live_face = "live_face" in request.files and bool(request.files["live_face"].filename)
-        live_file = request.files["live_face"] if has_live_face else None
-
+    live_image = None
+    if live_file is not None and live_file.filename:
         try:
-            image = Image.open(doc_file.stream)
-            image.load()
-            # Memory-Safe Auto Scale: Cap oversized images at 1280px to prevent container OOM crashes
-            max_doc_dim = 1280
-            if max(image.width, image.height) > max_doc_dim:
-                scale = max_doc_dim / float(max(image.width, image.height))
-                new_w, new_h = int(image.width * scale), int(image.height * scale)
-                image = image.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            live_image = load_image(live_file.stream, max_dim=800)
         except Exception as e:
-            return jsonify({"error": f"Invalid document image format: {str(e)}"}), 400
+            return jsonify({"error": f"Invalid live face image format: {str(e)}"}), 400
 
-        live_image = None
-        if has_live_face and live_file:
-            try:
-                live_image = Image.open(live_file.stream)
-                live_image.load()
-                max_live_dim = 800
-                if max(live_image.width, live_image.height) > max_live_dim:
-                    scale = max_live_dim / float(max(live_image.width, live_image.height))
-                    new_w, new_h = int(live_image.width * scale), int(live_image.height * scale)
-                    live_image = live_image.resize((new_w, new_h), Image.Resampling.LANCZOS)
-            except Exception as e:
-                return jsonify({"error": f"Invalid live face image format: {str(e)}"}), 400
+    try:
+        response_payload = run_screening(image, live_image)
+    except Exception as err:
+        app.logger.exception("Internal scan processing error")
+        return jsonify({"error": f"Internal scan processing error: {str(err)}"}), 500
+    return jsonify(sanitize_for_json(response_payload))
 
-        doc_code = db.next_doc_code()
-        saved_name = f"{doc_code}.jpg"
-        try:
-            os.makedirs(UPLOAD_DIR, exist_ok=True)
-            image.convert("RGB").save(os.path.join(UPLOAD_DIR, saved_name), "JPEG")
-        except Exception as save_err:
-            print("Warning: Could not save image to uploads directory:", save_err)
 
-        analysis, extracted, evidence_regions = {}, {}, []
+def run_screening(image, live_image):
+    analysis, extracted, evidence_regions = {}, {}, []
 
+    with SCAN_LOCK:
         # 1. Fast Single-Pass OCR
-        ocr_res = ocr.extract_text_fast(image)
-        raw_ocr_text = ocr_res.get("text", "")
-        
-        # 2. Document Classification & Field Parsing
-        mrz_lines = mrz.extract_mrz_lines(raw_ocr_text)
-        doc_type = document_extractor.detect_document_type(raw_ocr_text, mrz_lines)
-        
-        mrz_result = {"valid_format": False, "checksum_valid": False, "fields": {}, "errors": []}
-        if doc_type == "Passport":
-            if len(mrz_lines) == 2:
-                mrz_result = mrz.parse_td3(mrz_lines[0], mrz_lines[1])
-            extracted = document_extractor.extract_passport_fields(mrz_result)
-            analysis["mrz"] = {
-                "status": "VALID" if mrz_result["checksum_valid"] else "ALERT",
-                "detail": "MRZ checksum valid" if mrz_result["checksum_valid"] else "; ".join(mrz_result["errors"]) or "MRZ invalid"
-            }
-        elif doc_type == "PAN Card":
-            extracted = document_extractor.extract_pan_fields(raw_ocr_text)
-            analysis["mrz"] = {"status": "N/A", "detail": "MRZ not applicable to PAN Cards"}
-        elif doc_type == "Aadhaar Card":
-            extracted = document_extractor.extract_aadhaar_fields(raw_ocr_text)
-            analysis["mrz"] = {"status": "N/A", "detail": "MRZ not applicable to Aadhaar documents"}
-        else:
-            extracted = document_extractor.extract_generic_fields(raw_ocr_text, doc_type)
-            analysis["mrz"] = {"status": "N/A", "detail": "MRZ not detected for generic document"}
-
-        # 3. Forensic Tampering Analysis
+        raw_ocr_text = ocr.extract_text_fast(image).get("text", "")
+        # 2. Forensic Tampering Analysis
         tamper_result = tamper.error_level_analysis(image, ocr_text=raw_ocr_text)
-        analysis["tampering"] = {
-            "status": "ALERT" if tamper_result["tampering_detected"] else "VALID",
-            "detail": tamper_result["detail"]
+        # 3. Biometric Face Verification
+        match_data = face_match.compare_faces(image, live_image) if live_image is not None else None
+
+    # 4. Document Classification & Field Parsing
+    mrz_lines = mrz.extract_mrz_lines(raw_ocr_text)
+    doc_type = document_extractor.detect_document_type(raw_ocr_text, mrz_lines)
+
+    mrz_result = {"valid_format": False, "checksum_valid": False, "fields": {}, "errors": []}
+    if doc_type == "Passport":
+        if len(mrz_lines) == 2:
+            mrz_result = mrz.parse_td3(mrz_lines[0], mrz_lines[1])
+        extracted = document_extractor.extract_passport_fields(mrz_result)
+        analysis["mrz"] = {
+            "status": "VALID" if mrz_result["checksum_valid"] else "ALERT",
+            "detail": "MRZ checksum valid" if mrz_result["checksum_valid"] else "; ".join(mrz_result["errors"]) or "MRZ invalid"
         }
-        for r in tamper_result.get("suspicious_regions", []):
-            evidence_regions.append(r)
+    elif doc_type == "PAN Card":
+        extracted = document_extractor.extract_pan_fields(raw_ocr_text)
+        analysis["mrz"] = {"status": "N/A", "detail": "MRZ not applicable to PAN Cards"}
+    elif doc_type == "Aadhaar Card":
+        extracted = document_extractor.extract_aadhaar_fields(raw_ocr_text)
+        analysis["mrz"] = {"status": "N/A", "detail": "MRZ not applicable to Aadhaar documents"}
+    else:
+        extracted = document_extractor.extract_generic_fields(raw_ocr_text, doc_type)
+        analysis["mrz"] = {"status": "N/A", "detail": "MRZ not detected for generic document"}
 
-        # 4. Biometric Face Verification
-        if live_image is not None:
-            match_data = face_match.compare_faces(image, live_image)
-            face_result = {**match_data, "compared": True}
-            
-            if match_data.get("doc_box"):
-                if match_data["match"]:
-                    evidence_regions.append({
-                        **match_data["doc_box"],
-                        "severity": "low",
-                        "label": f"Verified Portrait ({match_data['similarity']}%)"
-                    })
-                else:
-                    evidence_regions.append({
-                        **match_data["doc_box"],
-                        "severity": "high",
-                        "label": f"Face Mismatch / Untrusted Portrait ({match_data['similarity']}%)"
-                    })
+    analysis["tampering"] = {
+        "status": "ALERT" if tamper_result["tampering_detected"] else "VALID",
+        "detail": tamper_result["detail"]
+    }
+    evidence_regions.extend(tamper_result.get("suspicious_regions", []))
 
-            analysis["face_verification"] = {
-                "status": "MATCH" if match_data["match"] else "ALERT",
-                "detail": match_data["reason"]
-            }
+    if match_data is not None:
+        face_result = {**match_data, "compared": True}
+        if match_data.get("doc_box"):
+            if match_data["match"]:
+                evidence_regions.append({
+                    **match_data["doc_box"],
+                    "severity": "low",
+                    "label": f"Verified Portrait ({match_data['similarity']}%)"
+                })
+            else:
+                evidence_regions.append({
+                    **match_data["doc_box"],
+                    "severity": "high",
+                    "label": f"Face Mismatch / Untrusted Portrait ({match_data['similarity']}%)"
+                })
+        analysis["face_verification"] = {
+            "status": "MATCH" if match_data["match"] else "ALERT",
+            "detail": match_data["reason"]
+        }
+    else:
+        match_data = {"match": True, "similarity": 100, "reason": "Biometric face comparison omitted"}
+        face_result = {**match_data, "compared": False}
+        analysis["face_verification"] = {
+            "status": "N/A",
+            "detail": "Live biometric capture not provided"
+        }
+
+    # 5. Document Integrity & Validity Assessment
+    expiry_date = parse_dmy(extracted.get("Date of Expiry"))
+    expired = bool(expiry_date and expiry_date < date.today())
+    if tamper_result["tampering_detected"]:
+        analysis["ocr"] = {"status": "ALERT", "detail": "Extraction compromised due to physical/digital alteration"}
+        analysis["document_validation"] = {"status": "ALERT", "detail": "Structural integrity failed (Tampering detected)"}
+        extracted["Document Status"] = "COMPROMISED / TAMPERED"
+    else:
+        ocr_ok = bool(raw_ocr_text.strip()) and (extracted.get("Full Name") not in ["UNKNOWN", "UNREADABLE"])
+        analysis["ocr"] = {
+            "status": "VALID" if ocr_ok else "ALERT",
+            "detail": f"{doc_type} recognized, fields extracted" if ocr_ok else "Text unreadable or incomplete"
+        }
+        if expired:
+            analysis["document_validation"] = {"status": "ALERT", "detail": f"{doc_type} expired on {extracted['Date of Expiry']}"}
         else:
-            match_data = {"match": True, "similarity": 100, "reason": "Biometric face comparison omitted", "compared": False}
-            face_result = {**match_data, "compared": False}
-            analysis["face_verification"] = {
-                "status": "N/A",
-                "detail": "Live biometric capture not provided"
-            }
-
-        # 5. Document Integrity Assessment
-        if tamper_result["tampering_detected"]:
-            analysis["ocr"] = {"status": "ALERT", "detail": "Extraction compromised due to physical/digital alteration"}
-            analysis["document_validation"] = {"status": "ALERT", "detail": "Structural integrity failed (Tampering detected)"}
-            extracted["Document Status"] = "COMPROMISED / TAMPERED"
-        else:
-            ocr_ok = bool(raw_ocr_text.strip()) and (extracted.get("Full Name") not in ["UNKNOWN", "UNREADABLE"])
-            analysis["ocr"] = {
-                "status": "VALID" if ocr_ok else "ALERT",
-                "detail": f"{doc_type} recognized, fields extracted" if ocr_ok else "Text unreadable or incomplete"
-            }
             analysis["document_validation"] = {
                 "status": "VALID" if doc_type != "Unknown" else "ALERT",
                 "detail": f"{doc_type} structure recognized" if doc_type != "Unknown" else "Unrecognized security structure"
             }
 
-        analysis["database_verification"] = {"status": "VALID", "detail": "Cleared against active Watchlist & Central Registry"}
-
-        # 6. Risk Scoring
-        risk_result = risk.compute_risk(
-            doc_type=doc_type,
-            mrz_result=mrz_result,
-            tamper_result=tamper_result,
-            face_result=face_result,
-            expiry_flag=False,
-            db_match=True
-        )
-
-        record = {
-            "doc_code": doc_code,
-            "doc_type": doc_type,
-            "full_name": extracted.get("Full Name", "UNKNOWN"),
-            "nationality": extracted.get("Nationality", "N/A"),
-            "risk_score": risk_result["score"],
-            "risk_level": risk_result["level"],
-            "status": "Completed",
-            "scanned_at": datetime.now().strftime("%d %b %Y, %I:%M %p"),
-            "extracted": extracted,
-            "analysis": analysis,
-            "evidence": evidence_regions,
-            "image_path": f"/uploads/{saved_name}"
+    # 6. Watchlist Verification
+    holder = str(extracted.get("Full Name", "")).strip()
+    holder_readable = holder.upper() not in UNREADABLE
+    doc_numbers = [str(extracted.get(k, "")) for k in ("Passport No.", "PAN Number")]
+    doc_numbers = [n for n in doc_numbers if n.upper() not in UNREADABLE]
+    watchlist_hits = db.find_watchlist_matches(holder if holder_readable else "", doc_numbers)
+    if watchlist_hits:
+        hit = watchlist_hits[0]
+        analysis["database_verification"] = {"status": "ALERT", "detail": f"Watchlist match: {hit['name']} ({hit['reason']})"}
+    elif holder_readable or doc_numbers:
+        analysis["database_verification"] = {
+            "status": "VALID",
+            "detail": f"No match against {len(db.list_watchlist())} active watchlist entries"
         }
-        doc_id = db.insert_document(record)
+    else:
+        analysis["database_verification"] = {"status": "N/A", "detail": "Watchlist check skipped: holder name not extracted"}
 
-        manual_referral = {
-            "required": bool(not match_data["match"] or risk_result["score"] >= 30),
-            "reason": "Biometric face mismatch. In-person physical identity verification and secondary border officer inspection required." if not match_data["match"] else "Risk score threshold reached.",
-            "search_term": extracted.get("Full Name") or extracted.get("PAN Number") or extracted.get("Aadhaar Number") or doc_code
-        }
+    # 7. Risk Scoring (weights come from the Rule Engine)
+    risk_result = risk.compute_risk(
+        doc_type=doc_type,
+        mrz_result=mrz_result,
+        tamper_result=tamper_result,
+        face_result=face_result,
+        expiry_flag=expired,
+        watchlist_hit=bool(watchlist_hits),
+        weights=db.get_rule_weights()
+    )
 
-        response_payload = {
-            "id": doc_id,
-            "doc_code": doc_code,
-            "document_type": doc_type,
-            "extracted": extracted,
-            "analysis": analysis,
-            "risk": risk_result,
-            "evidence": evidence_regions,
-            "manual_referral": manual_referral,
-            "image_path": f"/uploads/{saved_name}"
-        }
+    record = {
+        "doc_type": doc_type,
+        "full_name": extracted.get("Full Name", "UNKNOWN"),
+        "nationality": extracted.get("Nationality", "N/A"),
+        "risk_score": risk_result["score"],
+        "risk_level": risk_result["level"],
+        "status": "Completed",
+        "scanned_at": db.now_str(),
+        "extracted": extracted,
+        "analysis": analysis,
+        "evidence": sanitize_for_json(evidence_regions),
+    }
+    doc_id, doc_code = db.insert_document(record)
+    image_path = f"/uploads/{doc_code}.jpg"
+    try:
+        image.save(os.path.join(UPLOAD_DIR, f"{doc_code}.jpg"), "JPEG")
+    except OSError as save_err:
+        app.logger.warning("Could not save scan image %s: %s", doc_code, save_err)
+    audit(f"Document Scanned: {doc_code}", details=f"{doc_type}, {risk_result['level']} ({risk_result['score']}/100)")
 
-        return jsonify(sanitize_for_json(response_payload))
-    except Exception as err:
-        print("Internal scan processing error:", err)
-        return jsonify({"error": f"Internal scan processing error: {str(err)}"}), 500
+    if watchlist_hits:
+        referral_reason = f"Watchlist match ({watchlist_hits[0]['reason']}). Detain for secondary inspection."
+    elif not match_data["match"]:
+        referral_reason = "Biometric face mismatch. In-person physical identity verification and secondary border officer inspection required."
+    else:
+        referral_reason = "Risk score threshold reached. Manual officer verification required."
+    manual_referral = {
+        "required": bool(watchlist_hits or not match_data["match"] or risk_result["score"] >= 30),
+        "reason": referral_reason,
+        "search_term": extracted.get("Full Name") or extracted.get("PAN Number") or extracted.get("Aadhaar Number") or doc_code
+    }
+
+    return {
+        "id": doc_id,
+        "doc_code": doc_code,
+        "document_type": doc_type,
+        "extracted": extracted,
+        "analysis": analysis,
+        "risk": risk_result,
+        "evidence": evidence_regions,
+        "manual_referral": manual_referral,
+        "image_path": image_path
+    }
+
+
+# ---------------------------------------------------------------- files
 
 @app.route("/uploads/<path:filename>")
 def serve_upload(filename):
     return send_from_directory(UPLOAD_DIR, filename)
 
+
 @app.route("/")
 def serve_index():
     return send_from_directory(FRONTEND_DIR, "index.html")
+
 
 @app.route("/<path:path>")
 def serve_frontend_static(path):
@@ -550,6 +634,8 @@ def serve_frontend_static(path):
         return jsonify({"error": "Not Found"}), 404
     return send_from_directory(FRONTEND_DIR, "index.html")
 
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(debug=True, host="0.0.0.0", port=port)
+    debug = os.environ.get("FLASK_DEBUG", "").lower() in ("1", "true", "yes")
+    app.run(debug=debug, host="0.0.0.0", port=port)

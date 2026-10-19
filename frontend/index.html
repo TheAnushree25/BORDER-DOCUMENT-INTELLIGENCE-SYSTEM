@@ -19,18 +19,19 @@
     <form id="login-form" onsubmit="return false;">
       <div class="form-group">
         <label>Officer / Admin Username</label>
-        <input type="text" id="login-user" value="admin" autocomplete="username" />
+        <input type="text" id="login-user" placeholder="e.g. admin" autocomplete="username" />
       </div>
       <div class="form-group">
         <label>Security Password</label>
-        <input type="password" id="login-pass" value="Admin@123" autocomplete="current-password" />
+        <input type="password" id="login-pass" placeholder="Security password" autocomplete="current-password" />
       </div>
       <div id="login-error" class="login-error-msg" style="display: none;"></div>
       <button type="button" id="btn-login-submit" class="btn-primary btn-login">🔓 Authenticate &amp; Access Dashboard</button>
     </form>
 
-    <div class="login-divider"><span>SIH Demo Quick Login:</span></div>
-    <button type="button" class="btn-quick-demo" id="btn-quick-login">⚡ One-Click Login as Demo Admin (admin / Admin@123)</button>
+    <!-- Shown only while the admin account still uses the published demo password -->
+    <div class="login-divider demo-login" style="display: none;"><span>SIH Demo Quick Login:</span></div>
+    <button type="button" class="btn-quick-demo demo-login" id="btn-quick-login" style="display: none;">⚡ One-Click Login as Demo Admin (admin / Admin@123)</button>
   </div>
 </div>
 
@@ -169,7 +170,7 @@
   <div class="officer" id="btn-admin-profile" style="cursor: pointer;" title="Click to open System Administrator Command Center">
     <div class="officer-avatar">👤</div>
     <div>
-      <div class="officer-title" style="display:flex; align-items:center; gap:4px;">System Administrator <span style="font-size:11px;">⚙️</span></div>
+      <div class="officer-title" style="display:flex; align-items:center; gap:4px;"><span id="officer-name">Officer</span> <span style="font-size:11px;">⚙️</span></div>
       <div class="officer-sub" id="shift-label">Daily Shift: Active</div>
     </div>
   </div>
@@ -187,7 +188,7 @@
     <a class="menu-item">🗄️ Database Check</a>
     <a class="menu-item">⚙️ Rule Engine</a>
     <a class="menu-item">📋 Audit Logs</a>
-    <a class="menu-item">👤 Users &amp; Roles</a>
+    <a class="menu-item admin-only">👤 Users &amp; Roles</a>
     <a class="menu-item">🔧 System Settings</a>
 
     <div class="menu-label" style="margin-top:24px;">SYSTEM STATUS</div>
@@ -226,9 +227,9 @@
         <section class="card">
           <h3 style="margin-top:0;">SECURITY METRIC BREAKDOWN</h3>
           <div id="dashboard-risk-breakdown" style="padding: 6px 0; font-size: 12px; line-height: 1.9;">
-            <div>Integrity Pass Rate: <b style="color:var(--green)">94.2%</b></div>
-            <div>Quarantined / Tampered: <b style="color:var(--red)" id="dash-high-count">0</b></div>
-            <div>Biometric Match Ratio: <b style="color:var(--blue)">98.1%</b></div>
+            <div>Integrity Pass Rate: <b style="color:var(--green)" id="dash-integrity-rate">—</b></div>
+            <div>Quarantined / High Risk: <b style="color:var(--red)" id="dash-high-count">0</b></div>
+            <div>Biometric Match Ratio: <b style="color:var(--blue)" id="dash-face-rate">—</b></div>
           </div>
         </section>
       </div>
@@ -417,11 +418,13 @@
       <div class="card" style="max-width:600px;">
         <h3 style="margin-top:0;">FORENSIC RISK SCORING WEIGHTS</h3>
         <p style="color:var(--muted); font-size:12px; margin-bottom:16px;">Adjust risk penalty weights assigned by the automated analysis matrix.</p>
-        <div class="form-group"><label>Tampering / Alteration Weight (pts)</label><input type="number" id="rule-tamper" value="65" /></div>
-        <div class="form-group"><label>Biometric Face Mismatch Weight (pts)</label><input type="number" id="rule-face" value="25" /></div>
-        <div class="form-group"><label>MRZ Mismatch Weight (pts)</label><input type="number" id="rule-mrz" value="20" /></div>
-        <div class="form-group"><label>Expiry Issue Weight (pts)</label><input type="number" id="rule-expiry" value="10" /></div>
-        <button type="button" id="btn-save-rules" class="btn-primary" style="margin-top:10px; width:100%;">💾 Save Risk Rules</button>
+        <div class="form-group"><label>Tampering / Alteration Weight (pts)</label><input type="number" id="rule-tamper" min="0" max="100" value="65" /></div>
+        <div class="form-group"><label>Biometric Face Mismatch Weight (pts)</label><input type="number" id="rule-face" min="0" max="100" value="30" /></div>
+        <div class="form-group"><label>MRZ Mismatch Weight (pts)</label><input type="number" id="rule-mrz" min="0" max="100" value="20" /></div>
+        <div class="form-group"><label>Expiry Issue Weight (pts)</label><input type="number" id="rule-expiry" min="0" max="100" value="10" /></div>
+        <div class="form-group"><label>Watchlist Match Weight (pts)</label><input type="number" id="rule-watchlist" min="0" max="100" value="60" /></div>
+        <p style="color:var(--muted); font-size:11px; margin:0;">Score ≥ 30 is Medium risk, ≥ 60 is High risk. Tampering and watchlist matches are always High risk unless their weight is 0.</p>
+        <button type="button" id="btn-save-rules" class="btn-primary admin-only" style="margin-top:10px; width:100%;">💾 Save Risk Rules</button>
       </div>
     </div>
 
@@ -450,14 +453,18 @@
         <!-- Enroll Officer Form (Collapsible) -->
         <div id="enroll-user-card" style="display:none; background:var(--panel-2); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:18px;">
           <div style="font-weight:700; color:#fff; font-size:13px; margin-bottom:12px;">👮 Enroll Authorized Border Personnel</div>
-          <div style="display:grid; grid-template-columns: 1fr 1.5fr 1fr auto; gap:10px; align-items:end;">
+          <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap:10px; align-items:end;">
             <div class="form-group" style="margin:0;">
               <label>Officer Username</label>
-              <input type="text" id="new-user-username" placeholder="e.g. officer_sharma" />
+              <input type="text" id="new-user-username" placeholder="e.g. officer_sharma" autocomplete="off" />
             </div>
             <div class="form-group" style="margin:0;">
               <label>Full Name</label>
               <input type="text" id="new-user-fullname" placeholder="e.g. Inspector R. Sharma" />
+            </div>
+            <div class="form-group" style="margin:0;">
+              <label>Initial Password</label>
+              <input type="password" id="new-user-password" placeholder="Min. 6 characters" autocomplete="new-password" />
             </div>
             <div class="form-group" style="margin:0;">
               <label>Clearance Role</label>
@@ -512,14 +519,14 @@
             <div style="background:var(--panel-2); padding:12px; border-radius:8px; border:1px solid var(--border); display:flex; justify-content:space-between; align-items:center;">
               <div>
                 <div style="font-weight:700; color:#fff;">Central Watchlist &amp; Database</div>
-                <div style="color:var(--muted); font-size:11px;">SQLite 3 WAL Mode • 351 Screened Documents Indexed</div>
+                <div style="color:var(--muted); font-size:11px;" id="diag-db-summary">SQLite 3</div>
               </div>
               <span class="tag VALID">Synced</span>
             </div>
           </div>
         </div>
 
-        <div class="card">
+        <div class="card admin-only">
           <h3 style="margin-top:0;">ADMINISTRATIVE MAINTENANCE &amp; DATA CONTROLS</h3>
           <div style="display:flex; flex-direction:column; gap:14px; margin-top:14px;">
             <div style="background:var(--panel-2); padding:14px; border-radius:8px; border:1px solid var(--border);">
@@ -532,15 +539,15 @@
             <div style="background:var(--panel-2); padding:14px; border-radius:8px; border:1px solid var(--border);">
               <div style="font-weight:700; color:#fff; margin-bottom:4px;">💾 Download Live SQLite Database Backup</div>
               <div style="color:var(--muted); font-size:12px; margin-bottom:10px;">Export a standalone, byte-exact copy of the current border intelligence database.</div>
-              <a href="http://localhost:5000/api/admin/backup-db" target="_blank" class="btn-referral" style="text-decoration:none; padding:7px 16px; font-size:12px;">📥 Download .DB Backup</a>
+              <a href="/api/admin/backup-db" class="btn-referral" style="text-decoration:none; padding:7px 16px; font-size:12px;">📥 Download .DB Backup</a>
             </div>
 
             <div style="background:var(--panel-2); padding:14px; border-radius:8px; border:1px solid var(--border);">
               <div style="font-weight:700; color:#fff; margin-bottom:4px;">📊 Export Intelligence Summary Report</div>
               <div style="color:var(--muted); font-size:12px; margin-bottom:10px;">Download complete spreadsheet audit of all processed travel documents.</div>
               <div style="display:flex; gap:10px;">
-                <a href="http://localhost:5000/api/admin/export-report?format=csv" target="_blank" class="btn-referral" style="text-decoration:none; padding:7px 14px; font-size:12px;">Download CSV Report</a>
-                <a href="http://localhost:5000/api/admin/export-report?format=json" target="_blank" class="btn-referral secondary" style="text-decoration:none; padding:7px 14px; font-size:12px;">Download JSON Dataset</a>
+                <a href="/api/admin/export-report?format=csv" class="btn-referral" style="text-decoration:none; padding:7px 14px; font-size:12px;">Download CSV Report</a>
+                <a href="/api/admin/export-report?format=json" class="btn-referral secondary" style="text-decoration:none; padding:7px 14px; font-size:12px;">Download JSON Dataset</a>
               </div>
             </div>
           </div>
@@ -569,7 +576,7 @@
       <div style="display: flex; align-items: center; gap: 14px;">
         <div style="font-size: 38px; background: rgba(0,0,0,0.3); padding: 8px; border-radius: 50%;">👤</div>
         <div>
-          <div style="font-size: 15px; font-weight: 800; color: #fff;">System Administrator</div>
+          <div style="font-size: 15px; font-weight: 800; color: #fff;" id="admin-modal-name">System Administrator</div>
           <div style="font-size: 11.5px; color: #60a5fa; font-weight: 600;">ID: BSF-INTEL-8492 • COMMAND LEVEL 5</div>
           <div style="font-size: 11px; color: var(--muted);">Active Node: IN-BORDER-GW-01 (Online)</div>
         </div>
@@ -578,11 +585,11 @@
     </div>
 
     <!-- Quick Action Controls -->
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px;">
+    <div class="admin-only" style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px;">
       <div style="background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 14px;">
         <div style="font-weight: 700; font-size: 13px; color: #fff; margin-bottom: 4px;">📥 Export Intelligence</div>
         <div style="color: var(--muted); font-size: 11px; margin-bottom: 10px;">Download complete forensic database report.</div>
-        <a href="http://localhost:5000/api/admin/export-report?format=csv" target="_blank" class="btn-referral" style="text-decoration:none; padding:6px 12px; font-size:11.5px; display:inline-block;">Export CSV</a>
+        <a href="/api/admin/export-report?format=csv" class="btn-referral" style="text-decoration:none; padding:6px 12px; font-size:11.5px; display:inline-block;">Export CSV</a>
       </div>
 
       <div style="background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 14px;">
@@ -594,9 +601,10 @@
 
     <!-- Password Rotation Box -->
     <div style="background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 14px;">
-      <div style="font-weight: 700; font-size: 13px; color: #fff; margin-bottom: 6px;">🔑 Rotate Administrator Password</div>
-      <div style="display: flex; gap: 10px;">
-        <input type="password" id="admin-new-password" placeholder="Enter new security password..." style="flex:1; padding:8px 12px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:#fff; font-size:12px; outline:none;" />
+      <div style="font-weight: 700; font-size: 13px; color: #fff; margin-bottom: 6px;">🔑 Rotate My Password</div>
+      <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+        <input type="password" id="admin-current-password" placeholder="Current password" autocomplete="current-password" style="flex:1; min-width:140px; padding:8px 12px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:#fff; font-size:12px; outline:none;" />
+        <input type="password" id="admin-new-password" placeholder="New password (min. 6 characters)" autocomplete="new-password" style="flex:1; min-width:140px; padding:8px 12px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:#fff; font-size:12px; outline:none;" />
         <button type="button" id="btn-admin-change-pass" class="btn-primary" style="padding:8px 16px; font-size:12px;">Update Password</button>
       </div>
       <div id="admin-pass-msg" style="font-size:11.5px; margin-top:6px; display:none;"></div>

@@ -1,144 +1,102 @@
-# 🚀 Border Document Intelligence System — Production Deployment Guide
+# 🚀 Deployment Guide
 
-This project is packaged with production configurations for **Render / Railway (Docker)**, **Ubuntu Cloud VPS (AWS EC2 / DigitalOcean / Linode)**, and **Local Edge / Windows On-Premises Checkpoints**.
+The app is one Docker container: Flask + Gunicorn serve the UI and the API on the same URL, and SQLite plus the scanned images live in `DATA_DIR` (`/app/data` in Docker).
 
----
+## Before you deploy
 
-## 🌟 Option 1: Free Cloud Deployment (Render.com / Railway.app) — *Easiest with Docker*
-
-Render and Railway automatically detect and build the root **`Dockerfile`**, pre-configuring **Tesseract OCR (Eng + Hin)**, **OpenCV**, and **Gunicorn multi-threading**.
-
-### Step 1: Push Code to GitHub
-```bash
-git init
-git add .
-git commit -m "Deploy Border Document Intelligence System"
-git branch -M main
-git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPOSITORY.git
-git push -u origin main
-```
-
-### Step 2: Deploy on Render
-1. Visit **[dashboard.render.com](https://dashboard.render.com/)** and click **New +** → **Web Service**.
-2. Connect your GitHub repository.
-3. Configure the service:
-   - **Environment / Runtime**: `Docker`
-   - **Plan**: `Free`
-   - **Health Check Path**: `/api/health`
-4. Click **Deploy Web Service**.
-5. Render will build the container and provide your live public HTTPS URL (e.g., `https://border-doc-intel.onrender.com`).
+1. **Set a real admin password.** Set `ADMIN_PASSWORD` before the first start. While the admin account still uses the published `Admin@123`, anyone can sign in with the one-click demo button.
+2. **Set `SECRET_KEY`** to a long random string (Render's blueprint generates one for you).
+3. **Use HTTPS.** Browsers only allow the webcam on `https://` (or `localhost`). Render, Railway and Hugging Face give you HTTPS automatically.
+4. **Decide about storage.** Free hosting wipes the disk on every restart and redeploy, so scans, users and the watchlist reset. To keep them, attach a persistent disk at `/app/data`.
+5. **Memory.** One worker uses roughly 300–400 MB while scanning. Keep `WEB_CONCURRENCY=1` on 512 MB plans; that is what caused the earlier 502 errors (two workers loading two copies of the models).
 
 ---
 
-## ☁️ Option 2: Deploy on an Ubuntu Cloud VPS (AWS EC2 / DigitalOcean / Linode)
+## Option 1: Render (already configured in `render.yaml`)
 
-If deploying directly on an Ubuntu 22.04 / 24.04 Linux Virtual Private Server:
+1. Push this repository to GitHub.
+2. In the Render dashboard click **New → Blueprint**, pick the repository, and click **Apply**. Render reads `render.yaml`, builds the `Dockerfile`, generates `SECRET_KEY`, and asks you for `ADMIN_PASSWORD`.
+3. The first build takes about 5–10 minutes. You then get a URL like `https://border-doc-intel.onrender.com`.
 
-### Step 1: Install System Dependencies & Tesseract OCR
+**Already created the service by hand?** In the service's **Settings**, check that the runtime is **Docker** and the Health Check Path is `/health`. Under **Environment** add `SECRET_KEY` (random string), `ADMIN_PASSWORD`, `SESSION_COOKIE_SECURE=true` and `WEB_CONCURRENCY=1`, then **Manual Deploy → Clear build cache & deploy**.
+
+**Free plan caveats.** 512 MB RAM and 0.1 CPU: the app fits with one worker, but a scan can take 30–60 seconds, the service sleeps after 15 idle minutes (the next visit takes about a minute to wake), and data resets on each deploy. For a live demo, the **Starter** plan (0.5 CPU) is much faster. To keep data, add a **Disk** (paid plans) with mount path `/app/data`.
+
+---
+
+## Option 2: Hugging Face Spaces (free, 2 vCPU and 16 GB RAM)
+
+Faster than Render's free plan for OCR and face models.
+
+1. Create a Space at https://huggingface.co/new-space with SDK **Docker** (blank template).
+2. In the Space **Settings → Variables and secrets**, add secrets `SECRET_KEY`, `ADMIN_PASSWORD` and a variable `SESSION_COOKIE_SECURE=true`.
+3. Push this code to the Space's git repository. The Space's `README.md` must start with this header so Hugging Face knows the port:
+
+   ```yaml
+   ---
+   title: Border Document Intelligence
+   sdk: docker
+   app_port: 10000
+   ---
+   ```
+4. Open the app at its direct URL, `https://<user>-<space>.hf.space`. The embedded view on huggingface.co blocks the login cookie.
+
+Data resets when the Space restarts unless you buy persistent storage (mounted at `/data`; then set `DATA_DIR=/data`).
+
+---
+
+## Option 3: Railway
+
+Railway builds the `Dockerfile` using `railway.json`. Create a project from the GitHub repo, add the variables `SECRET_KEY`, `ADMIN_PASSWORD` and `SESSION_COOKIE_SECURE=true`, then generate a domain under **Settings → Networking**. To keep data, add a **Volume** mounted at `/app/data`.
+
+---
+
+## Option 4: Your own server (persistent data)
+
+On any Linux VPS with Docker (AWS EC2, DigitalOcean, Azure; 1 GB RAM or more):
+
 ```bash
-sudo apt update && sudo apt upgrade -y
-sudo apt install -y python3-pip python3-venv git tesseract-ocr tesseract-ocr-hin tesseract-ocr-eng libgl1 libglib2.0-0 nginx
+git clone https://github.com/enigmaeyes4u/BORDER-DOCUMENT-INTELLIGENCE-SYSTEM.git
+cd BORDER-DOCUMENT-INTELLIGENCE-SYSTEM
+cp .env.example .env        # then edit SECRET_KEY and ADMIN_PASSWORD
+docker compose up -d --build
 ```
 
-### Step 2: Clone Repository & Setup Python Virtual Environment
+The app runs on port 5000 and keeps its data in the `border_data` Docker volume. For HTTPS (needed for the webcam), point a domain at the server and put Caddy in front, which gets a certificate automatically:
+
 ```bash
-git clone https://github.com/YOUR_USERNAME/YOUR_REPOSITORY.git
-cd BORDER-DOC-INTEL
-python3 -m venv venv
-source venv/bin/activate
-pip install --upgrade pip
+sudo apt install -y caddy
+sudo caddy reverse-proxy --from your-domain.com --to localhost:5000
+```
+
+Add `SESSION_COOKIE_SECURE=true` to `.env` once HTTPS works, then `docker compose up -d`.
+
+---
+
+## Option 5: Windows checkpoint PC (no Docker)
+
+```bat
 pip install -r requirements.txt
-pip install gunicorn
+start_production.bat
 ```
 
-### Step 3: Configure Systemd Background Service
-Create the service unit file:
-```bash
-sudo nano /etc/systemd/system/border_intel.service
-```
-
-Paste the following configuration (replace `<USER>` and `/path/to/BORDER-DOC-INTEL` with your actual username and path):
-```ini
-[Unit]
-Description=Border Intelligence Flask Service
-After=network.target
-
-[Service]
-User=ubuntu
-WorkingDirectory=/home/ubuntu/BORDER-DOC-INTEL/backend
-ExecStart=/home/ubuntu/BORDER-DOC-INTEL/venv/bin/gunicorn --workers 3 --threads 4 --bind 127.0.0.1:5000 app:app
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start the service:
-```bash
-sudo systemctl daemon-reload
-sudo systemctl start border_intel
-sudo systemctl enable border_intel
-sudo systemctl status border_intel
-```
-
-### Step 4: Configure Nginx Reverse Proxy
-Create the Nginx site configuration:
-```bash
-sudo nano /etc/nginx/sites-available/border_intel
-```
-
-Paste:
-```nginx
-server {
-    listen 80;
-    server_name your_server_ip_or_domain;
-    client_max_body_size 25M;
-
-    location / {
-        proxy_pass http://127.0.0.1:5000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
-
-Enable the site and restart Nginx:
-```bash
-sudo ln -s /etc/nginx/sites-available/border_intel /etc/nginx/sites-enabled/
-sudo nginx -t
-sudo systemctl restart nginx
-```
-
-### Step 5: Enable Free SSL / HTTPS *(Required for Live Webcam Permissions)*
-Web browsers automatically block webcam and biometric camera access on insecure `http://` domains. Secure your domain with free Let's Encrypt SSL:
-```bash
-sudo apt install -y certbot python3-certbot-nginx
-sudo certbot --nginx -d your_domain.com
-```
+This runs Waitress on http://localhost:5000. Data is stored in `backend\` next to the code.
 
 ---
 
-## 🐳 Option 3: 1-Command Docker Deployment
+## Not supported: Vercel and other serverless hosts
 
-To run directly on any server with Docker installed:
-```bash
-docker compose up --build -d
-```
-Your service will be live on `http://YOUR_SERVER_IP:5000` with persistent storage for documents and SQLite database in `./backend/`.
+The OCR and face models exceed serverless bundle limits, and the app needs a writable disk for SQLite and the scanned images. Use one of the container options above.
 
 ---
 
-## 🏢 Option 4: On-Premises Windows Production Server
+## Troubleshooting
 
-Double-click **`start_production.bat`** in the project root to run the multi-threaded Waitress WSGI server on port `5000`.
-
----
-
-### 🛡️ Production Verification Checklist
-
-- [x] **Unified Frontend & Backend**: Flask serves static HTML/CSS/JS files and API endpoints on a single origin.
-- [x] **Dynamic Port Detection**: `PORT` environment variable detected automatically for cloud platforms.
-- [x] **Relative API Origin**: `API_BASE` set to `window.location.origin` in `frontend/script.js`.
-- [x] **Pre-Configured OCR & Biometrics**: Tesseract OCR (Eng/Hin) and OpenCV configured in Docker and requirements.
+| Symptom | Cause and fix |
+| :--- | :--- |
+| 502 / worker restarts during a scan | Out of memory. Keep `WEB_CONCURRENCY=1` or use an instance with more RAM. Check the host's logs for `Killed` / OOM. |
+| First scan after a while is very slow | Cold start: the service was asleep, or the models load on the first scan. |
+| Camera does not open | The page is not on HTTPS, or the browser blocked camera permission. |
+| Logged out after every deploy | `SECRET_KEY` is not set, so a new one is generated with each fresh database. Set it as an environment variable. |
+| "Authentication required" on every request | The browser is not keeping the session cookie: use the site's direct URL, and only set `SESSION_COOKIE_SECURE=true` when serving over HTTPS. |
+| All data disappeared | Free hosts use temporary disks. Attach persistent storage at `DATA_DIR`. |

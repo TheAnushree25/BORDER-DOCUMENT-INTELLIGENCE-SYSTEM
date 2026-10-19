@@ -1,6 +1,4 @@
 import os
-import cv2
-import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 def create_sample_id():
@@ -52,15 +50,18 @@ def create_sample_id():
     # MRZ Zone
     draw.rectangle([0, 390, w, h], fill=(235, 238, 242), outline=(180, 190, 205), width=1)
     
+    # Check digits follow ICAO 9303 (7-3-1 weights); the last digit is the composite check.
     line1 = "P<INDYADAV<<ABHISHEK<<<<<<<<<<<<<<<<<<<<<<<"
-    line2 = "R1234567<5IND0404125M3205091<<<<<<<<<<<<<<02"
+    line2 = "R1234567<5IND0404125M3205091<<<<<<<<<<<<<<06"
 
-    # Draw MRZ Text
-    draw.text((30, 410), line1, fill=(0, 0, 0))
-    draw.text((30, 455), line2, fill=(0, 0, 0))
+    # Draw MRZ Text large enough for OCR to read reliably
+    mrz_font = ImageFont.load_default(size=17)
+    draw.text((20, 410), line1, fill=(0, 0, 0), font=mrz_font)
+    draw.text((20, 455), line2, fill=(0, 0, 0), font=mrz_font)
 
-    os.makedirs("test_samples", exist_ok=True)
-    out_path = os.path.join("test_samples", "sample_passport.jpg")
+    out_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "test_samples")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "sample_passport.jpg")
     img.save(out_path, "JPEG", quality=95)
     print(f"Generated sample passport at: {out_path}")
     return out_path

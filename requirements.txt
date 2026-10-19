@@ -1,9 +1,10 @@
 Flask==3.0.3
-Flask-Cors==4.0.1
-gunicorn==22.0.0
+gunicorn==23.0.0
 waitress==3.0.0
 Pillow==10.4.0
-opencv-python-headless==4.10.0.84
+# One OpenCV build only: rapidocr-onnxruntime depends on opencv-python, so adding
+# opencv-python-headless as well installs two builds into the same cv2 package.
+opencv-python==4.10.0.84
 numpy==1.26.4
 pytesseract==0.3.10
 rapidocr-onnxruntime==1.3.24
