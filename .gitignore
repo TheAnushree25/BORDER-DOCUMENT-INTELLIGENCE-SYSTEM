@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.pytest_cache/
+
+# Runtime data: scanned documents and the SQLite database contain personal data
+data/
+backend/uploads/
+backend/*.db
+backend/*.db-*
