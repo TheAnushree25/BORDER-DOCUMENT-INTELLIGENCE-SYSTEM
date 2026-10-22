@@ -419,11 +419,13 @@
         <h3 style="margin-top:0;">FORENSIC RISK SCORING WEIGHTS</h3>
         <p style="color:var(--muted); font-size:12px; margin-bottom:16px;">Adjust risk penalty weights assigned by the automated analysis matrix.</p>
         <div class="form-group"><label>Tampering / Alteration Weight (pts)</label><input type="number" id="rule-tamper" min="0" max="100" value="65" /></div>
+        <div class="form-group"><label>Altered / Overwritten Text Weight (pts)</label><input type="number" id="rule-text" min="0" max="100" value="50" /></div>
+        <div class="form-group"><label>Field Data Mismatch Weight (pts)</label><input type="number" id="rule-data" min="0" max="100" value="35" /></div>
         <div class="form-group"><label>Biometric Face Mismatch Weight (pts)</label><input type="number" id="rule-face" min="0" max="100" value="30" /></div>
         <div class="form-group"><label>MRZ Mismatch Weight (pts)</label><input type="number" id="rule-mrz" min="0" max="100" value="20" /></div>
         <div class="form-group"><label>Expiry Issue Weight (pts)</label><input type="number" id="rule-expiry" min="0" max="100" value="10" /></div>
         <div class="form-group"><label>Watchlist Match Weight (pts)</label><input type="number" id="rule-watchlist" min="0" max="100" value="60" /></div>
-        <p style="color:var(--muted); font-size:11px; margin:0;">Score ≥ 30 is Medium risk, ≥ 60 is High risk. Tampering and watchlist matches are always High risk unless their weight is 0.</p>
+        <p style="color:var(--muted); font-size:11px; margin:0;">Score ≥ 30 is Medium risk, ≥ 60 is High risk. Tampering, altered text and watchlist matches are always High risk, and a face or field data mismatch is at least Medium, unless their weight is 0.</p>
         <button type="button" id="btn-save-rules" class="btn-primary admin-only" style="margin-top:10px; width:100%;">💾 Save Risk Rules</button>
       </div>
     </div>

@@ -116,11 +116,16 @@ def error_level_analysis(image: Image.Image, quality: int = 90, ocr_text: str = 
         for line in lines:
             if "DOB" in line.upper():
                 if re.search(r"DOB\s*[\.]\s*\d", line, re.IGNORECASE) or "DOB." in line or "DOB ." in line:
+                    # Mark the DOB line itself when OCR returned its position.
+                    box = next((b["box"] for b in (ocr_boxes or []) if b.get("text") == line), None)
+                    region = {"x_pct": 34.0, "y_pct": 31.5, "w_pct": 26.0, "h_pct": 5.5}
+                    if box:
+                        region = {
+                            "x_pct": round(box[0] / w * 100, 1), "y_pct": round(box[1] / h * 100, 1),
+                            "w_pct": round((box[2] - box[0]) / w * 100, 1), "h_pct": round((box[3] - box[1]) / h * 100, 1),
+                        }
                     suspicious_regions.append({
-                        "x_pct": 34.0,
-                        "y_pct": 31.5,
-                        "w_pct": 26.0,
-                        "h_pct": 5.5,
+                        **region,
                         "severity": "high",
                         "label": "Altered / Spliced DOB Delimiter (DOB .)"
                     })

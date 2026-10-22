@@ -12,11 +12,12 @@ IGNORE_TERMS = {
     "DOWNLOAD", "VID", "MERA", "PEHCHAN", "ADDRESS", "AND", "SIGNATURE", "MALE/FEMALE",
     "FT", "SNAME", "FATHERNAME", "FATHERS", "INCOMETAX", "OFINDLA", "OFINDIA",
     "CITIZENSHIP", "VERIFICATION", "SCANNING", "OFFLINE", "ONLINE", "AUTHENTICATION",
-    "IS", "OF", "NOT", "DISCLAIMER", "CODE", "XML", "USED", "WITH", "LSSUED"
+    "IS", "OF", "NOT", "DISCLAIMER", "CODE", "XML", "USED", "WITH", "LSSUED", "NAME"
 }
 
 def clean_ocr_lines(raw_text: str):
-    return [l.strip() for l in raw_text.splitlines() if len(l.strip()) > 1]
+    # RapidOCR often drops the space between words ("RahulVerma"); split such camel-case runs back into words.
+    return [re.sub(r"(?<=[a-z])(?=[A-Z])", " ", l.strip()) for l in raw_text.splitlines() if len(l.strip()) > 1]
 
 def detect_document_type(ocr_text: str, mrz_lines: list = None) -> str:
     upper = ocr_text.upper()
@@ -138,6 +139,26 @@ def extract_pan_fields(ocr_text: str) -> dict:
 
     fields["Full Name"] = clean_lines[0] if len(clean_lines) >= 1 else "UNKNOWN"
     fields["Father's Name"] = clean_lines[1] if len(clean_lines) >= 2 else "NOT DETECTED"
+
+    # Current PAN cards print "Name" / "Father's Name" labels above the values; prefer those when present.
+    labelled = {}
+    for label, value in zip(lines, lines[1:]):
+        key = re.sub(r"[^A-Z]", "", label.upper())
+        if key.endswith("NAME") and re.fullmatch(r"[A-Za-z .]{3,}", value) and not PAN_REGEX.search(value.upper()):
+            labelled["Father's Name" if "FATHER" in key else "Full Name"] = value.upper().replace(".", " ").strip()
+    if "Full Name" in labelled:
+        name, father = labelled["Full Name"], labelled.get("Father's Name", "")
+        # Words run together in capitals ("RAHULVERMA"): the surname is usually shared with the father's name.
+        common = 0
+        while common < min(len(name), len(father)) and name[-1 - common] == father[-1 - common]:
+            common += 1
+        if " " not in name and 3 <= common < len(name):
+            name = f"{name[:-common]} {name[-common:]}"
+            if " " not in father and common < len(father):
+                father = f"{father[:-common]} {father[-common:]}"
+        fields["Full Name"] = name.title()
+        if father:
+            fields["Father's Name"] = father.title()
     return fields
 
 def extract_passport_fields(mrz_result: dict) -> dict:

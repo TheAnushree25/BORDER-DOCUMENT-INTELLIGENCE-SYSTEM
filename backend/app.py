@@ -19,7 +19,7 @@ from flask import Flask, Response, g, jsonify, request, send_file, send_from_dir
 from PIL import Image, ImageOps
 
 import database as db
-from utils import document_extractor, face_match, mrz, ocr, risk, tamper
+from utils import document_extractor, face_match, field_checks, mrz, ocr, risk, tamper, text_forensics
 
 UPLOAD_DIR = db.UPLOAD_DIR
 FRONTEND_DIR = os.path.join(os.path.dirname(CURRENT_DIR), "frontend")
@@ -408,15 +408,17 @@ def sanitize_for_json(obj):
     return str(obj)
 
 
-def load_image(stream, max_dim):
+def load_image(stream, max_dim, keep_full=False):
     image = Image.open(stream)
     image.load()
     # Honour phone-camera rotation once, so OCR, forensics, face boxes and the saved evidence all agree.
     image = ImageOps.exif_transpose(image).convert("RGB")
+    full = image
     # Memory-Safe Auto Scale: cap oversized images to prevent container OOM crashes
     if max(image.size) > max_dim:
+        image = image.copy()
         image.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
-    return image
+    return (image, full) if keep_full else image
 
 
 def parse_dmy(value):
@@ -433,7 +435,10 @@ def scan_document():
 
     live_file = request.files.get("live_face")
     try:
-        image = load_image(request.files["document"].stream, max_dim=1280)
+        image, full = load_image(request.files["document"].stream, max_dim=1280, keep_full=True)
+        # Grayscale copy at upload resolution for the altered-text check: camera blur and noise survive there.
+        forensic_gray = text_forensics.prepare_image(full)
+        del full
     except Exception as e:
         return jsonify({"error": f"Invalid document image format: {str(e)}"}), 400
 
@@ -445,25 +450,54 @@ def scan_document():
             return jsonify({"error": f"Invalid live face image format: {str(e)}"}), 400
 
     try:
-        response_payload = run_screening(image, live_image)
+        response_payload = run_screening(image, live_image, forensic_gray)
     except Exception as err:
         app.logger.exception("Internal scan processing error")
         return jsonify({"error": f"Internal scan processing error: {str(err)}"}), 500
     return jsonify(sanitize_for_json(response_payload))
 
 
-def run_screening(image, live_image):
+def evidence_box(box, image, severity, label):
+    """Evidence overlay region (percent of the saved image) around an [x0, y0, x1, y1] pixel box."""
+    w, h = image.size
+    pad = 0.2 * (box[3] - box[1])
+    x0, y0 = max(0.0, box[0] - pad), max(0.0, box[1] - pad)
+    x1, y1 = min(float(w), box[2] + pad), min(float(h), box[3] + pad)
+    return {
+        "x_pct": round(x0 / w * 100, 1), "y_pct": round(y0 / h * 100, 1),
+        "w_pct": round((x1 - x0) / w * 100, 1), "h_pct": round((y1 - y0) / h * 100, 1),
+        "severity": severity, "label": label,
+    }
+
+
+def field_for_text(text, extracted):
+    """Name of the extracted field printed on an OCR line ("Full Name" for "Aman Gupta"), if any."""
+    line = re.sub(r"[^A-Z0-9]", "", text.upper())
+    for field, value in extracted.items():
+        key = re.sub(r"[^A-Z0-9]", "", str(value).upper().replace("XXXX", ""))
+        if field not in ("Document Type", "Document Status") and len(key) >= 4 and key in line:
+            return field
+    return None
+
+
+def run_screening(image, live_image, forensic_gray=None):
     analysis, extracted, evidence_regions = {}, {}, []
 
     with SCAN_LOCK:
         # 1. Fast Single-Pass OCR
-        raw_ocr_text = ocr.extract_text_fast(image).get("text", "")
+        ocr_result = ocr.extract_text_fast(image)
+        raw_ocr_text = ocr_result.get("text", "")
+        ocr_lines = ocr_result.get("lines", [])
         # 2. Forensic Tampering Analysis
-        tamper_result = tamper.error_level_analysis(image, ocr_text=raw_ocr_text)
-        # 3. Biometric Face Verification
+        tamper_result = tamper.error_level_analysis(image, ocr_text=raw_ocr_text, ocr_boxes=ocr_lines)
+        # 3. Altered-text forensics: every printed word compared with the rest of the document
+        if forensic_gray is None:
+            forensic_gray = text_forensics.prepare_image(image)
+        text_scan = text_forensics.analyze(forensic_gray, ocr_lines, scale=forensic_gray.shape[1] / float(image.width))
+        # 4. Biometric Face Verification
         match_data = face_match.compare_faces(image, live_image) if live_image is not None else None
 
-    # 4. Document Classification & Field Parsing
+    # 5. Document Classification & Field Parsing
     mrz_lines = mrz.extract_mrz_lines(raw_ocr_text)
     doc_type = document_extractor.detect_document_type(raw_ocr_text, mrz_lines)
 
@@ -492,6 +526,42 @@ def run_screening(image, live_image):
     }
     evidence_regions.extend(tamper_result.get("suspicious_regions", []))
 
+    # 6. Altered text and cross-field consistency
+    altered = text_scan["suspicious"]
+    places = []
+    for item in altered:
+        field = field_for_text(item["text"], extracted)
+        places.append(f"{field} ('{item['text']}')" if field else f"'{item['text']}'")
+        evidence_regions.append(evidence_box(item["box"], image, "high", f"Altered Text: {field or item['text']}"))
+    if altered:
+        analysis["text_integrity"] = {
+            "status": "ALERT",
+            "detail": f"Text typed or pasted over the document: {', '.join(places)}. {altered[0]['reasons'][0].capitalize()}"
+        }
+    elif text_scan["judged"]:
+        analysis["text_integrity"] = {
+            "status": "VALID",
+            "detail": f"{text_scan['checked']} printed words compared; all match the document's print and capture"
+        }
+    else:
+        analysis["text_integrity"] = {"status": "N/A", "detail": "Not enough printed text to compare"}
+
+    with SCAN_LOCK:
+        read_hindi = (lambda box: ocr.read_hindi(image, box)) if ocr.HIN_AVAILABLE else None
+        field_result = field_checks.run(doc_type, extracted, raw_ocr_text, ocr_lines, mrz_result, read_hindi)
+    mismatches = field_result["findings"]
+    for finding in mismatches:
+        if finding.get("box"):
+            evidence_regions.append(evidence_box(finding["box"], image, "medium", f"Data Mismatch: {finding['check']}"))
+    if mismatches:
+        analysis["field_consistency"] = {"status": "ALERT", "detail": "; ".join(f["detail"] for f in mismatches)}
+    elif field_result["checked"]:
+        analysis["field_consistency"] = {"status": "VALID", "detail": "Consistent: " + ", ".join(field_result["checked"])}
+    else:
+        analysis["field_consistency"] = {"status": "N/A", "detail": f"No cross-checkable fields read on this {doc_type}"}
+    if doc_type == "Aadhaar Card" and read_hindi is None:
+        analysis["field_consistency"]["detail"] += " (Hindi/English name check needs Tesseract with the Hindi language pack)"
+
     if match_data is not None:
         face_result = {**match_data, "compared": True}
         if match_data.get("doc_box"):
@@ -519,7 +589,7 @@ def run_screening(image, live_image):
             "detail": "Live biometric capture not provided"
         }
 
-    # 5. Document Integrity & Validity Assessment
+    # 7. Document Integrity & Validity Assessment
     expiry_date = parse_dmy(extracted.get("Date of Expiry"))
     expired = bool(expiry_date and expiry_date < date.today())
     if tamper_result["tampering_detected"]:
@@ -539,8 +609,11 @@ def run_screening(image, live_image):
                 "status": "VALID" if doc_type != "Unknown" else "ALERT",
                 "detail": f"{doc_type} structure recognized" if doc_type != "Unknown" else "Unrecognized security structure"
             }
+        if altered:
+            analysis["document_validation"] = {"status": "ALERT", "detail": f"Printed text altered: {', '.join(places)}"}
+            extracted["Document Status"] = "COMPROMISED / TEXT ALTERED"
 
-    # 6. Watchlist Verification
+    # 8. Watchlist Verification
     holder = str(extracted.get("Full Name", "")).strip()
     holder_readable = holder.upper() not in UNREADABLE
     doc_numbers = [str(extracted.get(k, "")) for k in ("Passport No.", "PAN Number")]
@@ -557,7 +630,7 @@ def run_screening(image, live_image):
     else:
         analysis["database_verification"] = {"status": "N/A", "detail": "Watchlist check skipped: holder name not extracted"}
 
-    # 7. Risk Scoring (weights come from the Rule Engine)
+    # 9. Risk Scoring (weights come from the Rule Engine)
     risk_result = risk.compute_risk(
         doc_type=doc_type,
         mrz_result=mrz_result,
@@ -565,7 +638,9 @@ def run_screening(image, live_image):
         face_result=face_result,
         expiry_flag=expired,
         watchlist_hit=bool(watchlist_hits),
-        weights=db.get_rule_weights()
+        weights=db.get_rule_weights(),
+        text_tampered=bool(altered),
+        data_mismatch=bool(mismatches)
     )
 
     record = {
@@ -590,12 +665,16 @@ def run_screening(image, live_image):
 
     if watchlist_hits:
         referral_reason = f"Watchlist match ({watchlist_hits[0]['reason']}). Detain for secondary inspection."
+    elif altered:
+        referral_reason = f"Altered document text ({', '.join(places)}). Retain the document and verify the holder with the issuing authority."
     elif not match_data["match"]:
         referral_reason = "Biometric face mismatch. In-person physical identity verification and secondary border officer inspection required."
+    elif mismatches:
+        referral_reason = f"Field data mismatch ({mismatches[0]['check']}). Verify the document with the issuing authority."
     else:
         referral_reason = "Risk score threshold reached. Manual officer verification required."
     manual_referral = {
-        "required": bool(watchlist_hits or not match_data["match"] or risk_result["score"] >= 30),
+        "required": bool(watchlist_hits or altered or mismatches or not match_data["match"] or risk_result["score"] >= 30),
         "reason": referral_reason,
         "search_term": extracted.get("Full Name") or extracted.get("PAN Number") or extracted.get("Aadhaar Number") or doc_code
     }

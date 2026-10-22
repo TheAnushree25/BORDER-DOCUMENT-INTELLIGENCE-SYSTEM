@@ -18,7 +18,7 @@ Open **http://localhost:5000**. Flask serves both the web UI and the API, so the
 
 - **Default login**: `admin` / `Admin@123`. While that default password is active, the login screen offers a one-click demo login. Set `ADMIN_PASSWORD` before the first start (or change it in the admin panel) and the demo button disappears.
 - **Tesseract OCR (optional fallback)**: RapidOCR is the main engine and installs with pip. Tesseract is used when RapidOCR returns too little text: `winget install UB-Mannheim.TesseractOCR` (Windows), `sudo apt-get install tesseract-ocr` (Linux), `brew install tesseract` (macOS).
-- **Sample documents**: `test_samples/` has synthetic passport, PAN and Aadhaar images to try.
+- **Sample documents**: `test_samples/` has synthetic passport, PAN and Aadhaar images to try. `sample_aadhaar_photo.jpg` is a camera-style photo of a card and `sample_aadhaar_edited_name.jpg` is the same photo with the name painted over and retyped (`python create_test_samples.py` rebuilds them).
 - **Webcam**: browsers only allow the camera on `http://localhost` or `https://`.
 
 ### Tests
@@ -64,6 +64,8 @@ Deployment instructions: **[DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)**.
 │       ├── mrz.py             # ICAO 9303 TD3 parser and all five check digits
 │       ├── document_extractor.py  # Passport / PAN / Aadhaar field parsing
 │       ├── tamper.py          # Error Level Analysis and paint/whiteout detection
+│       ├── text_forensics.py  # Altered-text detection: words typed or pasted over the document
+│       ├── field_checks.py    # Cross-field checks: Aadhaar checksum, Hindi/English name, PAN letters, passport MRZ
 │       ├── face_match.py      # YuNet + SFace matching, HOG fallback, liveness hint
 │       └── risk.py            # Weighted risk score
 ├── frontend/                  # Single-page UI (index.html, script.js, style.css)
@@ -121,9 +123,11 @@ Every API endpoint except `/health`, `/api/health`, login and `/api/auth/config`
 | **Expiry** | Real check | Passport expiry date from the MRZ compared with today. |
 | **OCR extraction** | Real check | RapidOCR (ONNX) with Tesseract fallback; regex parsing for PAN, Aadhaar and passport fields. |
 | **Tamper detection** | Heuristic | Error Level Analysis, flat digital-paint/whiteout detection and compression-grid anomalies. Expect false positives and misses. |
+| **Altered text** | Heuristic | Every OCR word is compared with the rest of the same document at upload resolution: edge sharpness, a flat painted-over patch behind the text, and flat digital ink. Catches a name or number typed over a photo or scan of a card (the evidence box marks the altered words). It cannot see edits on documents that are digital end to end (e-Aadhaar PDF/PNG), or edits blurred and noised to match the photo. |
+| **Field consistency** | Real check | Aadhaar Verhoeff check digit; Aadhaar Hindi name and gender against the English ones (needs Tesseract's `hin` pack, installed in the Docker image); PAN holder-type letter and surname letter; passport printed surname, given name, number and date of birth against the MRZ. |
 | **Face verification** | Prototype | YuNet detection + SFace embeddings (cosine similarity), HOG fallback, blur-based liveness hint. Not certified biometrics. |
 | **Watchlist** | Simulated registry | Local SQLite list, matched on the holder's name (word order ignored) or document number. |
-| **Risk score** | Rule engine | Sum of the Rule Engine weights; ≥ 30 is Medium, ≥ 60 is High. Tampering and watchlist matches are always High unless their weight is set to 0. |
+| **Risk score** | Rule engine | Sum of the Rule Engine weights, capped at 100; ≥ 30 is Medium, ≥ 60 is High. Default weights: tampering 65, watchlist 60, altered text 50, field data mismatch 35, face mismatch 30, MRZ 20, expiry 10. Tampering, altered text and watchlist matches are always High, and face or field data mismatches at least Medium, unless their weight is set to 0. |
 
 ---
 

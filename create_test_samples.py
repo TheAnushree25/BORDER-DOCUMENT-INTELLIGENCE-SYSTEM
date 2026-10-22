@@ -67,9 +67,9 @@ def create_aadhaar_sample():
     draw.text((260, 200), "DOB: 02/02/2006", fill="#000000")
     draw.text((260, 250), "Gender: MALE", fill="#000000")
 
-    # Aadhaar Number
+    # Aadhaar Number (ends in a valid Verhoeff check digit, like real Aadhaar numbers)
     draw.rectangle([(250, 340), (750, 410)], fill="#f8fafc", outline="#cbd5e1")
-    draw.text((320, 360), "5489 7621 7245", fill="#dc2626")
+    draw.text((320, 360), "5489 7621 7244", fill="#dc2626")
 
     # Footer
     draw.rectangle([(0, 490), (850, 540)], fill="#dc2626")
@@ -80,6 +80,78 @@ def create_aadhaar_sample():
     print(f"Created Aadhaar sample: {path}")
     return path
 
+def _font(names, size):
+    """First TrueType font found (Windows, then Linux), else Pillow's bundled font; None if a script is unavailable."""
+    for name in names:
+        for folder in ("C:/Windows/Fonts", "/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/truetype/noto"):
+            try:
+                return ImageFont.truetype(os.path.join(folder, name), size)
+            except OSError:
+                continue
+    return None
+
+
+def create_aadhaar_photo_samples(seed=7):
+    """
+    A camera-photo-like Aadhaar card (blur, sensor noise, uneven light, JPEG) and the same photo with the English
+    name painted over and retyped in an image editor - the case the altered-text detector looks for.
+    """
+    import io
+    import numpy as np
+    from PIL import ImageFilter
+
+    rng = np.random.default_rng(seed)
+    s = 1.5  # card rendered at 1284 x 810
+    latin = lambda size: _font(["arial.ttf", "DejaVuSans.ttf"], int(size * s)) or ImageFont.load_default(int(size * s))
+    latin_bold = lambda size: _font(["arialbd.ttf", "DejaVuSans-Bold.ttf"], int(size * s)) or latin(size)
+    hindi = lambda size: _font(["Nirmala.ttc", "NotoSansDevanagari-Regular.ttf"], int(size * s))
+
+    card = Image.new("RGB", (int(856 * s), int(540 * s)), (252, 252, 250))
+    d = ImageDraw.Draw(card)
+    d.rectangle([0, 0, card.width, int(18 * s)], fill=(255, 153, 51))
+    d.rectangle([0, int(36 * s), card.width, int(54 * s)], fill=(19, 136, 8))
+    d.text((int(250 * s), int(98 * s)), "Government of India", font=latin_bold(22), fill=(20, 20, 20))
+    if hindi(24):
+        d.text((int(250 * s), int(64 * s)), "भारत सरकार", font=hindi(26), fill=(20, 20, 20))
+        d.text((int(240 * s), int(160 * s)), "राहुल वर्मा", font=hindi(24), fill=(15, 15, 15))
+    # portrait placeholder
+    d.rectangle([int(40 * s), int(150 * s), int(210 * s), int(370 * s)], fill=(225, 230, 236))
+    d.ellipse([int(78 * s), int(180 * s), int(172 * s), int(300 * s)], fill=(214, 170, 140))
+    d.rectangle([int(54 * s), int(310 * s), int(196 * s), int(370 * s)], fill=(40, 70, 120))
+    name_xy = (int(240 * s), int(198 * s))
+    d.text(name_xy, "Rahul Verma", font=latin(24), fill=(15, 15, 15))
+    d.text((int(240 * s), int(240 * s)), "DOB: 14/08/1998", font=latin(22), fill=(15, 15, 15))
+    d.text((int(240 * s), int(278 * s)), "MALE", font=latin(22), fill=(15, 15, 15))
+    d.text((int(290 * s), int(420 * s)), "4182 7350 9126", font=latin_bold(40), fill=(10, 10, 10))
+    d.rectangle([0, int(492 * s), card.width, int(500 * s)], fill=(200, 30, 40))
+    name_box = d.textbbox(name_xy, "Rahul Verma", font=latin(24))
+
+    # simulated phone photo: paper texture, lens blur, uneven light, sensor noise, camera JPEG
+    a = np.asarray(card).astype(np.float32)
+    h, w = a.shape[:2]
+    tex = Image.fromarray(rng.normal(128, 40, (h // 4 + 1, w // 4 + 1)).clip(0, 255).astype(np.uint8)).resize((w, h), Image.BICUBIC)
+    a += ((np.asarray(tex).astype(np.float32) - 128) / 40 * 2.5)[..., None]
+    a = np.asarray(Image.fromarray(a.clip(0, 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(1.0))).astype(np.float32)
+    yy, xx = np.mgrid[0:h, 0:w]
+    a *= (1.0 - 0.18 * (((xx / w) - 0.3) ** 2 + ((yy / h) - 0.4) ** 2))[..., None]
+    a += rng.normal(0, 4.0, (h, w, 1)) + rng.normal(0, 2.0, a.shape)
+    buf = io.BytesIO()
+    Image.fromarray(a.clip(0, 255).astype(np.uint8)).save(buf, "JPEG", quality=88)
+    photo = Image.open(io.BytesIO(buf.getvalue())).convert("RGB")
+    photo.save(os.path.join(TEST_DIR, "sample_aadhaar_photo.jpg"), quality=92)
+
+    # the forgery: colour-picked box over the name, new name typed on top, saved from the editor
+    edited = photo.copy()
+    x0, y0, x1, y1 = name_box
+    pad = (y1 - y0) // 4
+    px = np.asarray(photo)[y0 - 3 * pad:y1 + 3 * pad, x1 + pad:x1 + 8 * pad].reshape(-1, 3)
+    ImageDraw.Draw(edited).rectangle([x0 - pad, y0 - pad, x1 + pad, y1 + pad], fill=tuple(int(v) for v in np.median(px, axis=0)))
+    ImageDraw.Draw(edited).text(name_xy, "Aman Gupta", font=latin(24), fill=(20, 20, 20))
+    edited.save(os.path.join(TEST_DIR, "sample_aadhaar_edited_name.jpg"), quality=92)
+    print("Created Aadhaar photo samples (genuine + edited name)")
+
+
 if __name__ == "__main__":
     create_pan_sample()
     create_aadhaar_sample()
+    create_aadhaar_photo_samples()
