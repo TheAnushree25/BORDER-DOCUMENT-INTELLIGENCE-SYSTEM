@@ -56,13 +56,18 @@ def auto_detect_and_crop_card(cv_img):
     and performs perspective correction.
     If the image is already a cropped document or no valid card boundary is found, returns original.
     """
+    return _crop_card(cv_img)[0]
+
+
+def _crop_card(cv_img):
+    """Returns (card image, perspective matrix from cv_img to the card), the matrix is None when nothing was cropped."""
     orig = cv_img.copy()
     h, w = orig.shape[:2]
     aspect = w / float(max(h, 1))
 
     # If the image is already a clean card aspect ratio (between 1.4 and 1.8), keep full card!
     if 1.40 <= aspect <= 1.80 and min(h, w) > 400:
-        return orig
+        return orig, None
 
     gray = cv2.cvtColor(orig, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -107,9 +112,37 @@ def auto_detect_and_crop_card(cv_img):
                 ], dtype="float32")
                 M = cv2.getPerspectiveTransform(rect, dst)
                 warped = cv2.warpPerspective(orig, M, (maxWidth, maxHeight))
-                return warped
+                return warped, M
 
-    return orig
+    return orig, None
+
+
+def _line_box(points, scale, warp, width, height):
+    """Maps an OCR quadrilateral from the (scaled, cropped) OCR input back to an [x0, y0, x1, y1] box on the source image."""
+    pts = np.asarray(points, dtype=np.float32).reshape(-1, 2) / scale
+    if warp is not None:
+        pts = cv2.perspectiveTransform(pts.reshape(-1, 1, 2), np.linalg.inv(warp)).reshape(-1, 2)
+    x0, y0 = np.clip(pts.min(axis=0), 0, [width, height])
+    x1, y1 = np.clip(pts.max(axis=0), 0, [width, height])
+    return [round(float(x0), 1), round(float(y0), 1), round(float(x1), 1), round(float(y1), 1)]
+
+
+def read_hindi(image: Image.Image, box) -> str | None:
+    """Devanagari text inside `box` ([x0, y0, x1, y1] on `image`) via Tesseract's Hindi model; None when unavailable."""
+    if not HIN_AVAILABLE:
+        return None
+    w, h = image.size
+    x0, y0 = max(0, int(box[0])), max(0, int(box[1]))
+    x1, y1 = min(w, int(round(box[2]))), min(h, int(round(box[3])))
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return None
+    crop = image.crop((x0, y0, x1, y1)).convert("L")
+    if crop.height < 64:
+        crop = crop.resize((int(crop.width * 64 / crop.height), 64), Image.Resampling.LANCZOS)
+    try:
+        return pytesseract.image_to_string(crop, lang="hin", config="--psm 7").strip()
+    except Exception:
+        return None
 
 
 def extract_text_fast(image: Image.Image) -> dict:
@@ -121,7 +154,7 @@ def extract_text_fast(image: Image.Image) -> dict:
         cv_img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
         # 1. Card Auto Crop / Deskew (if on background table)
-        cropped_card = auto_detect_and_crop_card(cv_img)
+        cropped_card, warp = _crop_card(cv_img)
 
         # 2. Optimized Preprocessing for OCR
         ch, cw = cropped_card.shape[:2]
@@ -143,6 +176,8 @@ def extract_text_fast(image: Image.Image) -> dict:
 
         text = ""
         engine_used = "none"
+        # Each recognised line with its confidence and [x0, y0, x1, y1] box on the input image (RapidOCR only).
+        line_boxes = []
 
         # 3. RapidOCR primary (Scale to max 960px for sub-second execution & low RAM)
         rapid_engine = _get_rapid_engine()
@@ -156,8 +191,13 @@ def extract_text_fast(image: Image.Image) -> dict:
 
                 rapid_res, _ = rapid_engine(rapid_input)
                 if rapid_res:
-                    lines = [item[1] for item in rapid_res if len(item) > 1 and item[1].strip()]
-                    text = "\n".join(lines)
+                    items = [item for item in rapid_res if len(item) > 2 and item[1].strip()]
+                    text = "\n".join(item[1] for item in items)
+                    h_img, w_img = cv_img.shape[:2]
+                    line_boxes = [
+                        {"text": item[1], "score": float(item[2]), "box": _line_box(item[0], scale_rapid, warp, w_img, h_img)}
+                        for item in items
+                    ]
                     engine_used = "rapidocr"
             except Exception:
                 pass
@@ -170,17 +210,20 @@ def extract_text_fast(image: Image.Image) -> dict:
                 if len(tess_text.strip()) > len(text.strip()):
                     text = tess_text
                     engine_used = "tesseract"
+                    line_boxes = []
             except Exception:
                 pass
 
         return {
             "text": text,
             "language": OCR_LANG,
-            "engine": engine_used
+            "engine": engine_used,
+            "lines": line_boxes
         }
     except Exception as exc:
         return {
             "text": "",
             "language": OCR_LANG,
-            "engine": "failed"
+            "engine": "failed",
+            "lines": []
         }

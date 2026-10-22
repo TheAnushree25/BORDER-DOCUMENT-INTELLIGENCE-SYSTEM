@@ -387,6 +387,8 @@ function renderAnalysis(data) {
     { key: "mrz", title: "MRZ Validation", icon: "🛂" },
     { key: "document_validation", title: "Document Validation", icon: "🛡️" },
     { key: "tampering", title: "Tampering Detection", icon: "🔍" },
+    { key: "text_integrity", title: "Altered Text Detection", icon: "✏️" },
+    { key: "field_consistency", title: "Field Consistency", icon: "🔗" },
     { key: "face_verification", title: "Face Verification", icon: "👤" },
     { key: "database_verification", title: "Watchlist Verification", icon: "🗄️" }
   ];
@@ -480,12 +482,17 @@ function renderAnalysis(data) {
   const eBox = document.getElementById("evidence-box");
   if (eBox && data.image_path) {
     eBox.innerHTML = "";
+    // Region percentages are relative to the scanned image, so the markers live in a wrapper that is exactly
+    // the size the image is drawn at (not the letterboxed evidence panel around it).
+    const stage = document.createElement("div");
+    stage.className = "evidence-stage";
     const img = document.createElement("img");
     img.src = `${API_BASE}${data.image_path}`;
-    eBox.appendChild(img);
+    stage.appendChild(img);
     (data.evidence || []).forEach((r) => {
       const marker = document.createElement("div");
-      marker.className = `marker ${r.severity === "low" ? "low" : "high"}`;
+      const severity = ["low", "medium"].includes(r.severity) ? r.severity : "high";
+      marker.className = `marker ${severity}${r.y_pct < 12 ? " tag-below" : ""}`;
       marker.style.left = `${r.x_pct}%`;
       marker.style.top = `${r.y_pct}%`;
       marker.style.width = `${r.w_pct}%`;
@@ -497,8 +504,9 @@ function renderAnalysis(data) {
       tag.textContent = r.label || "Anomaly";
       marker.appendChild(tag);
 
-      eBox.appendChild(marker);
+      stage.appendChild(marker);
     });
+    eBox.appendChild(stage);
   }
 }
 
@@ -910,6 +918,8 @@ if (dbSearchInput) {
 // View 7: Rule Engine
 const RULE_INPUTS = {
   tampering: "rule-tamper",
+  text_tampering: "rule-text",
+  data_mismatch: "rule-data",
   face_mismatch: "rule-face",
   mrz_mismatch: "rule-mrz",
   expiry_issue: "rule-expiry",

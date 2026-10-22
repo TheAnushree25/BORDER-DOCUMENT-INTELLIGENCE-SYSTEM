@@ -20,7 +20,7 @@ os.environ.pop("ADMIN_PASSWORD", None)
 sys.path.insert(0, ROOT)
 
 from backend.app import app  # noqa: E402
-from backend.utils import mrz, risk  # noqa: E402
+from backend.utils import field_checks, mrz, risk  # noqa: E402
 
 
 def login(client, username="admin", password="Admin@123"):
@@ -83,6 +83,9 @@ def test_passport_scan_end_to_end(admin):
     assert body["extracted"]["Full Name"] == "ABHISHEK YADAV"
     assert body["extracted"]["Nationality"] == "IND"
     assert body["analysis"]["database_verification"]["status"] == "VALID"
+    # printed name, number and date of birth agree with the MRZ
+    assert body["analysis"]["field_consistency"]["status"] == "VALID"
+    assert body["analysis"]["text_integrity"]["status"] == "VALID"
 
     # The evidence image is stored and served to logged-in users only.
     assert admin.get(body["image_path"]).status_code == 200
@@ -108,6 +111,64 @@ def test_watchlist_match_uses_rule_engine_weight(admin):
 def test_rule_weights_are_validated(admin):
     assert admin.post("/api/rules", json={"tampering": 500}).status_code == 400
     assert admin.post("/api/rules", json={"tampering": "abc"}).status_code == 400
+    rules = admin.get("/api/rules").get_json()
+    assert (rules["text_tampering"], rules["data_mismatch"], rules["face_mismatch"]) == (50, 35, 30)
+
+
+def test_name_typed_over_a_card_photo_is_flagged_on_the_name(admin):
+    body = scan(admin, "sample_aadhaar_edited_name.jpg").get_json()
+    assert body["analysis"]["text_integrity"]["status"] == "ALERT"
+    assert "Full Name" in body["analysis"]["text_integrity"]["detail"]
+    assert body["risk"]["factors"]["Altered / Overwritten Text"] == 50
+    assert body["risk"]["level"] == "High Risk"
+    assert body["manual_referral"]["required"] is True
+    # The evidence box covers the English name, which sits at x 28-44 %, y 37-42 % of the card.
+    region = next(r for r in body["evidence"] if r["label"].startswith("Altered Text"))
+    assert 25 <= region["x_pct"] <= 30 and 33 <= region["y_pct"] <= 39
+    assert region["x_pct"] + region["w_pct"] >= 42 and region["y_pct"] + region["h_pct"] >= 41
+
+
+def test_genuine_card_photo_has_no_altered_text(admin):
+    body = scan(admin, "sample_aadhaar_photo.jpg").get_json()
+    assert body["extracted"]["Full Name"] == "Rahul Verma"
+    assert body["analysis"]["text_integrity"]["status"] == "VALID"
+    assert body["analysis"]["field_consistency"]["status"] == "VALID"
+    assert body["risk"]["level"] == "Low Risk"
+
+
+def test_aadhaar_number_must_pass_the_verhoeff_check():
+    assert field_checks.verhoeff_valid("418273509126")
+    assert not field_checks.verhoeff_valid("418273509128")
+    lines = [{"text": "VID : 9134 5678 9012 3456", "box": [0, 0, 9, 9]}, {"text": "4182 7350 9128", "box": [0, 20, 9, 29]}]
+    findings = field_checks.run("Aadhaar Card", {}, "", lines)["findings"]
+    assert [f["check"] for f in findings] == ["Aadhaar checksum"]
+
+
+def test_english_name_is_compared_with_the_hindi_name():
+    assert field_checks.names_match("राहुल वर्मा", "Rahul Verma") >= 0.9
+    assert field_checks.names_match("अभिषेक यादव", "Abhishek Yadav") >= 0.9
+    assert field_checks.names_match("राहुल वर्मा", "Aman Gupta") < 0.5
+    lines = [{"text": "Aman Gupta", "box": [100, 100, 300, 130]}]
+    hindi_ocr = lambda box: "राहुल वर्मा"  # stands in for Tesseract reading the line above the English name
+    result = field_checks.run("Aadhaar Card", {"Full Name": "Aman Gupta"}, "", lines, read_hindi=hindi_ocr)
+    assert [f["check"] for f in result["findings"]] == ["Hindi / English name"]
+
+
+def test_pan_letters_must_match_the_holder():
+    lines = [{"text": "BQRPV4821K", "box": [0, 0, 9, 9]}]
+    fields = {"PAN Number": "BQRPV4821K", "Full Name": "Rahul Verma"}
+    assert field_checks.run("PAN Card", fields, "", lines)["findings"] == []
+    renamed = field_checks.run("PAN Card", {**fields, "Full Name": "Aman Gupta"}, "", lines)["findings"]
+    assert [f["check"] for f in renamed] == ["PAN / name"]
+
+
+def test_altered_text_and_field_mismatch_in_risk_engine():
+    clean = {"tampering_detected": False}
+    assert risk.compute_risk("Aadhaar Card", {}, clean, None, False, False, text_tampered=True)["level"] == "High Risk"
+    off = risk.compute_risk("Aadhaar Card", {}, clean, None, False, False, text_tampered=True, weights={"text_tampering": 0})
+    assert off["level"] == "Low Risk"
+    mismatch = risk.compute_risk("Aadhaar Card", {}, clean, None, False, False, data_mismatch=True)
+    assert (mismatch["level"], mismatch["score"]) == ("Medium Risk", 35)
 
 
 def test_officer_cannot_use_admin_endpoints(admin):

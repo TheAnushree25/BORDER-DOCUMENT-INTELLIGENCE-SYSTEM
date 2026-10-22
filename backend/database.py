@@ -21,7 +21,11 @@ ROLES = ("ADMIN", "SENIOR_INSPECTOR", "OFFICER", "ANALYST")
 # (id, name, default weight, description)
 DEFAULT_RULES = [
     ("tampering", "Tampering Detection (ELA)", 65, "Image compression artifact and splicing detection"),
+    ("text_tampering", "Altered / Overwritten Text", 50,
+     "Text typed or pasted over the printed document (edge sharpness, painted-over patch, flat ink)"),
     ("face_mismatch", "Face Biometric Mismatch", 30, "Discrepancy between document portrait and live capture"),
+    ("data_mismatch", "Field Data Mismatch", 35,
+     "Printed fields contradict each other (Aadhaar checksum, Hindi/English name, PAN surname letter, passport MRZ)"),
     ("mrz_mismatch", "ICAO TD3 MRZ Mismatch", 20, "Checksum validation failure or visual/MRZ mismatch"),
     ("expiry_issue", "Document Expiry Issue", 10, "Document is expired or has invalid validity period"),
     ("watchlist_hit", "Watchlist Match", 60, "Document holder matches an active watchlist entry"),
